@@ -132,8 +132,8 @@ def classify(path, explicitly_named, has_header):
 HEADER_RE = re.compile(
     r"("
     r"copyright\s*(?:\(c\)|\(\d|©|\d{4}|by\b)"
-    r"|(?:\(c\)|©)\s*\d{4}"
-    r"|©\s*[A-Z]"
+    r"|(?:\(c\)|©|Ⓒ)\s*\d{4}"
+    r"|[©Ⓒ]\s*[A-Z]"
     r"|all rights reserved"
     r"|licen[sc]ed under"
     r"|SPDX-FileCopyrightText:"
@@ -143,14 +143,34 @@ HEADER_RE = re.compile(
     r"|Redistribution and use in source"
     r"|under the terms of the GNU"
     r"|is free software[:;]"
+    # MPL 2.0's standard header names no copyright, no year, no (c) and no SPDX tag,
+    # so every line of it was invisible and the whole block could be deleted with the
+    # report certifying nothing had been altered. Matched on its three distinctive
+    # phrases rather than on any ownership word, because it contains none.
+    r"|Source Code Form is subject to"
+    r"|subject to the terms of the Mozilla"
+    r"|You can obtain one at"
+    r"|If a copy of the"
+    r"|proprietary and confidential"
     r")",
     re.I,
 )
 
 
+# Case-SENSITIVE, and separate for that reason alone. A copyright with no year -
+# "Copyright Example Corp" - can only be told from prose by what follows the word: a
+# capitalised name rather than "and licensing", "questions", "holder", "of each".
+# Putting that alternative in HEADER_RE does not work, because HEADER_RE carries re.I
+# and `[A-Z]` under re.I matches lowercase too - so it silently matched every prose
+# line in the corpus. A rule about capitalisation cannot live in a case-insensitive
+# pattern, however tidy it would be to keep them together.
+NAMED_COPYRIGHT_RE = re.compile(r"[Cc]opyright\s+(?:\(c\)\s*)?[A-Z]")
+
+
 def has_licence_header(text):
     """Whether this text asserts ownership. The single predicate; do not re-derive it."""
-    return bool(HEADER_RE.search(text or ""))
+    text = text or ""
+    return bool(HEADER_RE.search(text) or NAMED_COPYRIGHT_RE.search(text))
 
 
 # One record per line of the leading comment region, in file order.

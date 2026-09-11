@@ -321,6 +321,19 @@ class TestHeaderCorpus(unittest.TestCase):
         " * This program is free software: you can redistribute it and/or modify",
         " * it under the terms of the GNU Affero General Public License as published",
         " * GNU Lesser General Public License for more details.",
+        # MPL 2.0's standard header, found live by a red-team run: it names no
+        # copyright, no year, no (c) and no SPDX tag, so every line of it was
+        # invisible. Deleting the whole block passed with the report stating that no
+        # licence line had been altered. It is one of the most widely used headers
+        # there is, which is the point - the space this pattern covers is open, and
+        # only this list makes its edges visible.
+        " * This Source Code Form is subject to the terms of the Mozilla Public",
+        " * License, v. 2.0. If a copy of the MPL was not distributed with this",
+        " * file, You can obtain one at https://mozilla.org/MPL/2.0/.",
+        # Same run: a copyright with no year at all, and the circled form.
+        "# Copyright Example Corp",
+        " * Ⓒ 2020 Example Corp",
+        " * Proprietary and confidential.",
     ]
 
     PROSE = [
