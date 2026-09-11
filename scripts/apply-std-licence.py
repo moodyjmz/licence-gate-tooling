@@ -11,34 +11,46 @@ Prints a markdown report of what was applied and what was refused, so a wrong
 inference is visible rather than silent.
 """
 
-import subprocess
 import sys
 
-from licence_map import APPLY, classify, insert_header
-
-
-def sh(*args):
-    return subprocess.run(args, capture_output=True, text=True).stdout
+from git_io import GateError, changed_files
+from licence_map import (APPLY, classify, has_licence_header,
+                         insert_header, leading_comment_region)
 
 
 def added_files(base, head):
-    out = sh("git", "diff", "--name-status", f"{base}..{head}")
-    added = []
-    for line in out.strip().split("\n"):
-        if not line:
-            continue
-        parts = line.split("\t")
-        if parts[0].startswith("A"):
-            added.append(parts[-1])
-    return added
+    """New paths, and the subset of them that are not files at all.
+
+    Returns (added, gitlinks).
+
+    This used to be a second, independent enumerator over `git diff --name-status -z`.
+    --name-status carries no MODE, so it reports a submodule exactly as it reports a
+    file and this script could not see a gitlink at all. It failed safe only by
+    accident: `open()` on the submodule path raises, `has_header` reads an unreadable
+    file as "leave alone", and the path was refused with the reason "already carries a
+    header" - a statement about content that does not exist in this repository. Two
+    unrelated behaviours happening to line up is not a design, and nothing tested it.
+
+    The gate had already replaced --name-status with `--raw -z` for exactly this
+    reason. The fix did not propagate, because propagating fixes by hand across two
+    copies of a parser is a thing people forget. There is now one implementation, in
+    git_io, and "did it reach the other copy" is no longer a question anyone has to
+    ask.
+    """
+    added, _modified, _deleted, _renamed, _pairs, gitlinks = changed_files(base, head)
+    return added, gitlinks
 
 
 def has_header(path):
+    """Uses the one shared predicate. This was a third, separate implementation - a
+    literal search for "SPDX-License-Identifier" in the first 15 lines - which agreed
+    with neither of the other two. Three answers to "has this file got a header" is
+    how a file our own tool stamped became invisible to the gate enforcing headers."""
     try:
-        head = "".join(open(path, encoding="utf-8").readlines()[:15])
+        content = open(path, encoding="utf-8").read()
     except (OSError, UnicodeDecodeError):
         return True  # unreadable: treat as "leave alone"
-    return "SPDX-License-Identifier" in head
+    return has_licence_header(leading_comment_region(content))
 
 
 def write_header(path, licence):
@@ -60,7 +72,20 @@ def main(argv):
         pass
 
     applied, refused = [], []
-    for path in added_files(base, head):
+    added, gitlinks = added_files(base, head)
+    for path in added:
+        # Filtered here, by mode, and not inside classify(): licence_map is the pure
+        # decision module and knows nothing about git. A submodule holds content this
+        # repository neither stores nor wrote, so an assertion of authorship over it
+        # is meaningless however explicitly it was named - and stamping a header would
+        # write into the submodule's own checkout, not into this repository at all.
+        # It is refused with a reason that is TRUE, which the accident it replaces was
+        # not: "already carries a header" was said about a path with no content here.
+        if path in gitlinks:
+            refused.append((path, "a submodule, not a file in this repository - its "
+                                  "content and its licence belong to the repository it "
+                                  "points at; record it, do not stamp it"))
+            continue
         action, lic, reason = classify(path, path in explicit, has_header(path))
         if action == APPLY:
             write_header(path, lic)
@@ -90,4 +115,15 @@ def main(argv):
 
 
 if __name__ == "__main__":
-    sys.exit(main(sys.argv[1:]))
+    try:
+        sys.exit(main(sys.argv[1:]))
+    except GateError as exc:
+        # Said out loud, and exiting non-zero so the calling action stops before its
+        # commit-and-push step. "No new files needing a licence decision." is a
+        # statement about the tree; this could not read the tree, so it is not
+        # entitled to make one.
+        print(f"**The licence-header tool could not run.**\n\n```\n{exc}\n```\n\n"
+              f"No file was changed and nothing was recorded. This is not the same as "
+              f"\"no new files needed a decision\" - nothing was examined at all. A "
+              f"common cause is a checkout without full history.")
+        sys.exit(2)
