@@ -30,6 +30,12 @@ inputs:
   head-sha:
     description: Head commit of the pull request.
     required: true
+  author:
+    description: >-
+      Login of the pull request's author. Used so the report can say who is barred
+      from signing off rather than leaving the reader to discover it.
+    required: false
+    default: ''
 
 runs:
   using: composite
@@ -40,10 +46,11 @@ runs:
       env:
         BASE_SHA: ${{ inputs.base-sha }}
         HEAD_SHA: ${{ inputs.head-sha }}
+        AUTHOR: ${{ inputs.author }}
       run: |
         set +e
         python3 "${GITHUB_ACTION_PATH}/../../scripts/licence-gate.py" \
-          "$BASE_SHA" "$HEAD_SHA" > /tmp/licence-gate-report.md
+          --author="$AUTHOR" "$BASE_SHA" "$HEAD_SHA" > /tmp/licence-gate-report.md
         echo "exit=$?" >> "$GITHUB_OUTPUT"
         cat /tmp/licence-gate-report.md
 

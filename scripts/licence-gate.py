@@ -469,7 +469,8 @@ def apply_fix(head, paths):
     return fixed, unfixable
 
 
-def main(argv):
+def main(argv, author=None):
+    author = next((a.split("=", 1)[1] for a in argv if a.startswith("--author=")), author)
     candidates_only = "--candidates" in argv
     fix_mode = "--fix" in argv
     argv = [a for a in argv if not a.startswith("--")]
@@ -511,6 +512,61 @@ def main(argv):
     out = []
     blocking = bool(a or b or d_src)
 
+    # WHAT DO I DO NOW. This block exists because the report failed the only test that
+    # matters: the person who built the gate opened a pull request, read the report,
+    # and said "I don't know how to resolve this". Every fact needed was present and
+    # none of it was usable. Three things were wrong, and all three are fixed here.
+    #
+    #   * nothing said what was actually BLOCKING. A section headed "a licence decision
+    #     is needed", carrying its own "How to resolve", sat above a check that had
+    #     already passed - so the reader could not tell which of the two sections was
+    #     the one stopping the merge.
+    #   * advisory and blocking sections were formatted identically, so "you may want
+    #     to" and "this will not merge until" looked exactly alike.
+    #   * the disposition instruction was addressed to whoever was reading, but a
+    #     disposition from the AUTHOR is refused by design. The report told the one
+    #     person reading it to do the one thing they are barred from doing, and never
+    #     mentioned the bar.
+    #
+    # A gate that cannot say what to do next is a gate people route around, and being
+    # routed around looks identical to working.
+    todo = []
+    if b:
+        todo.append(("anyone with write access",
+                     "restore the {} this pull request removed or altered — by hand; "
+                     "this cannot be automated".format(
+                         "licence line" if len(b) == 1 else
+                         "{} licence lines".format(len(b)))))
+    if a:
+        todo.append(("anyone with write access, the author included",
+                     "add the modification notice to {} — comment `/auto-fix` and it "
+                     "is done for you".format(
+                         "1 file" if len(a) == 1 else "{} files".format(len(a)))))
+    if d_src:
+        todo.append(("anyone with write access",
+                     "give {} a licence header — by hand, since only a person knows "
+                     "where the content came from".format(
+                         "1 new file" if len(d_src) == 1 else
+                         "{} new files".format(len(d_src)))))
+    if c:
+        subject = ("the candidate below" if len(c) == 1
+                   else "every one of the {} candidates below".format(len(c)))
+        todo.append(("a reviewer" + (", NOT @" + author if author else ", not the author"),
+                     "answer {}, using the block at the end of this comment".format(subject)))
+
+    if todo:
+        out.append("### What has to happen before this merges\n")
+        for i, (who, what) in enumerate(todo, 1):
+            out.append("{}. **{}** — {}".format(i, who, what))
+        out.append("")
+        if c and author:
+            out.append("> @{} opened this pull request, so a disposition from them is "
+                       "refused — the whole value of the record is that a second person "
+                       "looked. Anyone else with write access can give it.\n".format(author))
+    else:
+        out.append("### Nothing to do — both checks pass\n")
+        out.append("Anything below is for information and does not block the merge.\n")
+
     if b:
         out.append(f"### Blocking — {len(b)} licence line(s) removed or altered\n")
         out.append("A licence has not changed, so no existing licence text may change. "
@@ -534,7 +590,7 @@ def main(argv):
         out.append("")
 
     if d_src or d_assets or d_links:
-        out.append("### New files — a licence decision is needed\n")
+        out.append("### New files — worth a look, does not block\n")
         out.append("**Not auto-fixed, deliberately.** A modified file always needs the same "
                    "notice, so a machine can add it. A new file needs a copyright holder, "
                    "and that depends on where the content came from — which no diff can "
@@ -548,13 +604,14 @@ def main(argv):
             out.append(f"- `{p}` — submodule added. Its content is in another repository "
                        f"and is not in this diff: what is it, who wrote it, and under "
                        f"which licence is it being vendored?")
-        out.append("\n**How to resolve:** add the correct header by hand. **`/auto-fix` "
-                   "deliberately will not touch these** — the right copyright holder "
-                   "depends on where the content came from, and guessing is how someone "
-                   "else's work ends up carrying yours.\n")
+        out.append("\n`/auto-fix` deliberately will not touch these: the right "
+                   "copyright holder depends on where the content came from, and "
+                   "guessing is how someone else's work ends up carrying yours. Add a "
+                   "header by hand if one is wanted — **none of this blocks the "
+                   "merge.**\n")
 
     if c:
-        out.append(f"### Needs your decision — {len(c)} candidate(s)\n")
+        out.append(f"### A reviewer must answer these — {len(c)} candidate(s)\n")
         out.append("These *may* be replacement events. Detection over-reports on "
                    "purpose; deciding is a human judgement, so every one needs an "
                    "answer, including \"no\".\n")
