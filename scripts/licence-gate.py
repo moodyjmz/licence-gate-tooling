@@ -87,6 +87,19 @@ def both_ends_ignorable(old_path, new_path):
     return bool(ends) and all(IGNORE_RE.match(p) for p in ends)
 
 
+def looks_binary(text):
+    """Whether this blob is bytes rather than lines.
+
+    A NUL byte is the test git itself uses, and it is the one that matters: text files
+    do not contain them. U+FFFD is counted too because blobs are read with
+    errors="replace", so undecodable bytes arrive as replacement characters rather
+    than as an exception - a run of those is a binary that decoded quietly.
+    """
+    if "\x00" in text:
+        return True
+    return text.count("\ufffd") > max(8, len(text) // 200)
+
+
 def check_b(base, head, pairs):
     """Deleted or altered licence/copyright lines. Returns [(path, line)].
 
@@ -123,26 +136,26 @@ def check_b(base, head, pairs):
     whitespace-altered line read as unchanged, which is narrowing detection to make
     something pass.
 
-    BINARY BLOBS NOW REACH THIS CHECK, and this is the known open cost of removing
-    the diff parser. `git diff` emitted `Binary files … differ`, so check_b never saw
-    a byte of them; a blob comparison reads them line by line under errors="replace".
+    BINARY BLOBS ARE ROUTED TO THE REVIEWER, NOT BLOCKED HERE. Removing the diff
+    parser meant binaries started reaching this check - `git diff` used to say
+    `Binary files … differ` - and a TrueType `name` table carries
+    `Copyright (c) 2011 Example Foundry` as plain ASCII, which survives the tolerant
+    decode. So a font swap blocked here, with advice ("restore the original line
+    exactly") that cannot be followed inside a .woff2.
 
-    THIS FIRES ON REAL FONTS, verified, not hypothetically: a TrueType `name` table
-    carries `Copyright (c) 2011 Example Foundry` as plain ASCII, that survives the
-    tolerant decode, and the replacement blob does not contain the same bytes. So a
-    font swap - the canonical replacement event this tool exists to police - blocks
-    here as well as raising a candidate, and the block's advice ("restore the original
-    line exactly") cannot be followed inside a .woff2.
+    This check answers "was a LINE removed or edited". A binary has no lines anyone
+    edits: its embedded copyright changes because the whole asset was replaced, which
+    is a different event with a different remedy. Reporting it here adds nothing that
+    "this asset changed" did not already say, and says it in a form nobody can act on
+    - which is how a gate gets switched off.
 
-    NOT "fixed" by excluding binaries from this check. A font's embedded copyright
-    string IS licence text and replacing it IS the event; narrowing detection so the
-    canonical case stops being detected would be the exact failure this tool's whole
-    bias is arranged against. The open question is ROUTING - whether a violation in a
-    blob with no textual remedy belongs in the candidate list a reviewer dispositions
-    rather than the blocking list - and that is a product decision, not a parser one.
-    Either way the path reaches a human, which is what the test below pins.
+    So this is ROUTING, not narrowing, and it is routing only because of the guarantee
+    below: every binary skipped here is raised as a candidate by check_c, whatever its
+    extension, and a reviewer must disposition it. If that guarantee ever stops
+    holding, this becomes a hole. `binary_skips` is returned for exactly that reason -
+    the caller feeds it to check_c rather than trusting the two to agree.
     """
-    violations = []
+    violations, binary_skips = [], []
     for old_path, new_path, old_is_link, new_is_link in pairs:
         if both_ends_ignorable(old_path, new_path):
             continue
@@ -162,6 +175,12 @@ def check_b(base, head, pairs):
             # raise both for a human.
             continue
         before = read_at(base, old_path, "the base version of")
+        # Decided by CONTENT, not extension. An extension list is what made .otf and
+        # .webp invisible once already, and the question here is whether the blob has
+        # lines at all - which its name cannot answer.
+        if looks_binary(before):
+            binary_skips.append(new_path or old_path)
+            continue
         # No head blob means every line of the base is gone, which is the truth and the
         # over-detecting direction. Both cases are real: an ordinary `git rm`, and a
         # licensed file overwritten by a gitlink at the same path. Asking `git show`
@@ -172,7 +191,7 @@ def check_b(base, head, pairs):
         for line in before.split("\n"):
             if has_licence_header(line) and line not in present:
                 violations.append((old_path, line.strip()))
-    return violations
+    return violations, binary_skips
 
 
 def read_at(rev, path, what):
@@ -279,7 +298,7 @@ def check_d(head, added, gitlinks=()):
     return needing, assets, links
 
 
-def check_c(added, modified, deleted, renamed, gitlinks=()):
+def check_c(added, modified, deleted, renamed, gitlinks=(), binary_skips=()):
     """Candidate replacement events. Over-detects by design."""
     cands = []
     for old, new in renamed:
@@ -308,6 +327,17 @@ def check_c(added, modified, deleted, renamed, gitlinks=()):
         if p not in seen:
             cands.append((p, "submodule (gitlink) added or changed - its content lives "
                              "in another repository and is not in this diff"))
+    # check_b skips binary blobs: they have no lines to remove, so a hit there says
+    # nothing that "this asset changed" did not, in a form nobody can act on. That is
+    # only routing rather than narrowing if every one of them reaches a reviewer here,
+    # so the skipped paths are passed in and added explicitly instead of trusting the
+    # extension rules to have covered them. A binary named .js would otherwise be
+    # skipped by check_b and classified as source by check_c, and vanish between them.
+    seen = {p for p, _ in cands}
+    for p in binary_skips:
+        if p not in seen:
+            cands.append((p, "binary content changed - no line-level check is possible, "
+                             "so the whole asset needs your decision"))
     return cands
 
 
@@ -457,7 +487,8 @@ def main(argv):
     base_paths.update({new: old for old, new in renamed})
 
     if candidates_only:
-        for p, _ in check_c(added, modified, deleted, renamed, gitlinks):
+        _, binary_skips = check_b(base, head, pairs)
+        for p, _ in check_c(added, modified, deleted, renamed, gitlinks, binary_skips):
             print(p)
         return 0
 
@@ -472,9 +503,9 @@ def main(argv):
             print(f"could not auto-fix: {p}", file=sys.stderr)
         return 0 if not unfixable else 3
 
-    b = check_b(base, head, pairs)
+    b, binary_skips = check_b(base, head, pairs)
     a = check_a(base, head, modified_for_a, base_paths, gitlinks)
-    c = check_c(added, modified, deleted, renamed, gitlinks)
+    c = check_c(added, modified, deleted, renamed, gitlinks, binary_skips)
     d_src, d_assets, d_links = check_d(head, added, gitlinks)
 
     out = []
@@ -541,7 +572,19 @@ def main(argv):
         out.append("```")
         out.append("")
 
-    verified = ["no licence or copyright line deleted or altered"] if not b else []
+    # Every line in this section tells the reviewer not to look, so it may only carry
+    # claims the run actually established. Binary blobs are skipped by check_b - they
+    # have no lines to compare - so where any were skipped the unqualified claim is
+    # false for them, and the qualified wording is what was really checked. Saying
+    # less is the price of the section being trustworthy at all.
+    verified = []
+    if not b:
+        verified.append(
+            "no licence or copyright line deleted or altered"
+            if not binary_skips else
+            f"no licence or copyright line deleted or altered in text files "
+            f"({len(binary_skips)} binary file(s) have no lines to compare and are "
+            f"listed above for your decision instead)")
     if not a:
         verified.append("every modified file with a header carries a notice")
     if verified:
