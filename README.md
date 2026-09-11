@@ -68,6 +68,27 @@ Candidate detection runs the other way and over-reports on purpose. It may say "
 might be a replacement"; it may never say "this isn't". A false prompt costs a
 reviewer seconds. A false all-clear is a missing record nobody knows is missing.
 
+### The acknowledgement gate is decorative until you mark it required
+
+`actions/acknowledgement` always exits 0 as a workflow step. That is on purpose — it
+must be able to report `pending` while it waits for a reviewer, and a failed step
+cannot say `pending`. Its teeth are the **commit status** it writes, named by the
+`status-context` input and defaulting to `acknowledgement-gate`.
+
+**A commit status blocks nothing unless branch protection says it must pass.** If the
+consuming repository does not mark that status as a required check, the whole
+disposition mechanism is inert: candidates go undispositioned, the status sits on
+`pending` or `failure` where nobody is obliged to look, the workflow step is green,
+and the pull request page is green. Nothing about the pull request page tells you
+this has happened — which is the same false all-clear the gate exists to prevent,
+relocated to the repository settings.
+
+So, in every consuming repository: mark the status as a required check. And mark it
+under the name the action is *actually configured to write* — if you override
+`status-context`, protecting the default `acknowledgement-gate` gives you a required
+check that never reports, which blocks every pull request for ever and gets removed
+by the first person it inconveniences.
+
 ## Consuming it
 
 See [`examples/`](examples/) for the four caller workflows. They are thin: trigger,
@@ -76,8 +97,13 @@ permissions, checkout, and the pinned `uses:`. Everything else is here.
 ## Tests
 
 ```sh
-cd scripts && python3 -m unittest test_licence_map -v
+cd scripts && python3 -m unittest discover -p 'test_*.py'
 ```
 
-20 tests. Each names the real failure it guards against — a test whose purpose is not
+Two suites. `test_licence_map` covers the pure decisions; `test_gate_integration`
+drives the gate against real throwaway git repositories, because every defect found
+in the security audits lived in the git-interacting code and none were reachable from
+a pure-function test.
+
+Each test names the real failure it guards against — a test whose purpose is not
 obvious gets deleted in six months by someone who cannot see why it matters.
