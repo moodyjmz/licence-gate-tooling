@@ -10,4 +10,4 @@ jobs:
         with:
           persist-credentials: false
       - working-directory: scripts
-        run: python3 -m unittest test_licence_map -v
+        run: python3 -m unittest discover -p 'test_*.py' -v
