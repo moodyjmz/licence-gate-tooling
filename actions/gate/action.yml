@@ -1,0 +1,77 @@
+name: Licence gate
+description: >-
+  Check a pull request's diff for removed licence lines, missing modification
+  notices, new files needing a licence decision, and candidate replacement events.
+
+# WHY THIS IS AN ACTION AND NOT A SCRIPT IN THE CONSUMING REPOSITORY
+#
+# The gate must not be editable by the thing it is gating. When the checks lived in
+# the consumer's own `scripts/` directory, the workflow checked out the pull request
+# and ran the gate from that checkout - so a pull request could edit the gate to
+# report nothing and exit zero, and the gate would pass itself. No permissions and
+# no cleverness required; just change the file you are being judged by.
+#
+# Consumed as an action pinned to a commit SHA, the code that runs is fixed at the
+# pin. The pull request's *content* is read freely - that is the input. Its *code*
+# is never executed.
+#
+# The pin must be a SHA. Pinned to a branch or a tag, a single push here changes the
+# gate everywhere at once, and this repository becomes the most security-critical
+# thing in the estate. Pinned to a SHA, a push here reaches nobody until someone
+# bumps the pin, and that bump is a reviewed pull request in the consuming repo.
+
+inputs:
+  token:
+    description: Token used to post the review comment.
+    required: true
+  base-sha:
+    description: Base commit of the pull request.
+    required: true
+  head-sha:
+    description: Head commit of the pull request.
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Run the gate
+      id: gate
+      shell: bash
+      env:
+        BASE_SHA: ${{ inputs.base-sha }}
+        HEAD_SHA: ${{ inputs.head-sha }}
+      run: |
+        set +e
+        python3 "${GITHUB_ACTION_PATH}/../../scripts/licence-gate.py" \
+          "$BASE_SHA" "$HEAD_SHA" > /tmp/licence-gate-report.md
+        echo "exit=$?" >> "$GITHUB_OUTPUT"
+        cat /tmp/licence-gate-report.md
+
+    - name: Post or update the review comment
+      uses: actions/github-script@v7
+      env:
+        HEAD_SHA: ${{ inputs.head-sha }}
+      with:
+        github-token: ${{ inputs.token }}
+        script: |
+          const fs = require('fs');
+          const body = fs.readFileSync('/tmp/licence-gate-report.md', 'utf8');
+          const marker = '<!-- licence-gate -->';
+          const sha = process.env.HEAD_SHA;
+          const text = `${marker}\n## Licence gate\n\n${body}\n\n---\n<sub>Evaluated at \`${sha.substring(0,9)}\`. A disposition made against an earlier commit does not carry over.</sub>`;
+          const {owner, repo} = context.repo;
+          const issue_number = context.issue.number;
+          const comments = await github.rest.issues.listComments({owner, repo, issue_number});
+          const mine = comments.data.find(c => c.body && c.body.includes(marker));
+          if (mine) {
+            await github.rest.issues.updateComment({owner, repo, comment_id: mine.id, body: text});
+          } else {
+            await github.rest.issues.createComment({owner, repo, issue_number, body: text});
+          }
+
+    - name: Fail if blocking checks failed
+      if: steps.gate.outputs.exit != '0'
+      shell: bash
+      run: |
+        echo "Blocking licence-gate checks failed. See the review comment."
+        exit 1

@@ -1,0 +1,131 @@
+name: Auto-fix modification notices
+description: >-
+  Apply the modification notice to modified files that carry a licence header and
+  lack one. Mechanical only; never touches new files.
+
+# Anyone with write access may trigger this, the author included. That is the
+# difference between this and a disposition: the notice is a fixed string applied to
+# a determinable set of files, so it carries no judgement and needs no independent
+# signatory.
+#
+# It deliberately does NOT stamp new files. A modified file always needs the same
+# notice. A new file needs a copyright *holder*, which depends on where the content
+# came from - and no diff can tell you that. Guessing is how someone else's icon set
+# ends up carrying your copyright.
+
+inputs:
+  token:
+    description: Token with write access to the pull request branch.
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Check the commenter may do this
+      id: auth
+      uses: actions/github-script@v7
+      with:
+        github-token: ${{ inputs.token }}
+        script: |
+          const {owner, repo} = context.repo;
+          const who = context.payload.comment.user.login;
+          // author_association reports organisation membership, not access to this
+          // repository. Authorise against the collaborator permission API instead.
+          let perm = 'none';
+          try {
+            const r = await github.rest.repos.getCollaboratorPermissionLevel(
+              {owner, repo, username: who});
+            perm = r.data.permission;
+          } catch (e) { perm = 'none'; }
+          if (!['admin', 'write', 'maintain'].includes(perm)) {
+            // Ignored in silence. Replying would confirm to someone probing that the
+            // command exists and that permission was the only thing in the way; the
+            // useful answer to an unauthorised caller is no answer at all. The refusal
+            // is still recorded - in the log and the run summary, both of which only
+            // people with repository access can read.
+            core.warning(
+              `IGNORED /auto-fix from ${who} (permission: ${perm}) on #${context.issue.number}`);
+            await core.summary
+              .addHeading('Ignored an unauthorised command', 3)
+              .addTable([
+                [{data: 'Command', header: true}, {data: 'Commenter', header: true},
+                 {data: 'Permission', header: true}, {data: 'Pull request', header: true}],
+                ['/auto-fix', who, perm || 'none', `#${context.issue.number}`],
+              ])
+              .write();
+            core.setOutput('ok', 'false');
+            return;
+          }
+          const pr = await github.rest.pulls.get(
+            {owner, repo, pull_number: context.issue.number});
+          core.setOutput('ok',
+            String(pr.data.head.repo.full_name === `${owner}/${repo}`));
+          core.setOutput('ref', pr.data.head.ref);
+          core.setOutput('base_sha', pr.data.base.sha);
+          if (pr.data.head.repo.full_name !== `${owner}/${repo}`) {
+            core.setFailed('Fork pull requests cannot be written to by this action.');
+          }
+
+    - name: Check out the pull request branch
+      if: steps.auth.outputs.ok == 'true'
+      uses: actions/checkout@v4
+      with:
+        ref: ${{ steps.auth.outputs.ref }}
+        fetch-depth: 0
+        token: ${{ inputs.token }}
+
+    - name: Apply the fix
+      if: steps.auth.outputs.ok == 'true'
+      id: fix
+      shell: bash
+      env:
+        BASE_SHA: ${{ steps.auth.outputs.base_sha }}
+      run: |
+        python3 "${GITHUB_ACTION_PATH}/../../scripts/licence-gate.py" --fix \
+          "$BASE_SHA" HEAD > /tmp/fixed.txt
+        echo "count=$(wc -l < /tmp/fixed.txt | tr -d ' ')" >> "$GITHUB_OUTPUT"
+        cat /tmp/fixed.txt
+
+    - name: Commit and push
+      if: steps.auth.outputs.ok == 'true' && steps.fix.outputs.count != '0'
+      shell: bash
+      env:
+        TRIGGERED_BY: ${{ github.event.comment.user.login }}
+        REF: ${{ steps.auth.outputs.ref }}
+      run: |
+        git config user.name "github-actions[bot]"
+        git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+        git add -A
+        {
+          echo "chore(license): add modification notices"
+          echo
+          echo "Applied mechanically on request. Each notice is appended to an"
+          echo "existing header block; no existing licence text, copyright line"
+          echo "or SPDX tag is altered."
+          echo
+          echo "Requested-by: ${TRIGGERED_BY}"
+        } > /tmp/commit-msg.txt
+        git commit -s -F /tmp/commit-msg.txt
+        git push origin "HEAD:${REF}"
+
+    - name: Report
+      if: steps.auth.outputs.ok == 'true'
+      uses: actions/github-script@v7
+      env:
+        COUNT: ${{ steps.fix.outputs.count }}
+      with:
+        github-token: ${{ inputs.token }}
+        script: |
+          const {owner, repo} = context.repo;
+          const n = process.env.COUNT;
+          if (!n) {
+            // The fix step did not report a count, so it did not complete. Claiming
+            // anything was applied here would be a false statement about the tree.
+            core.setFailed('auto-fix did not complete; nothing was applied');
+            return;
+          }
+          const body = n === '0'
+            ? 'Nothing to auto-fix — no modified file is missing its notice.'
+            : `Applied the modification notice to ${n} file(s). Nothing existing was altered.\n\nNew files and altered licence lines are **not** auto-fixed; those need a human.`;
+          await github.rest.issues.createComment(
+            {owner, repo, issue_number: context.issue.number, body});

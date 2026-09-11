@@ -1,0 +1,179 @@
+name: Acknowledgement gate
+description: >-
+  Require a reviewer - not the author - to record a disposition for every candidate
+  replacement event, against the current head commit.
+
+# This gate does not evaluate the compliance judgement. It cannot: whether a changed
+# asset is a "replacement" needing a register entry is exactly the question a machine
+# should not answer. What it does is record, verifiably, that a reviewer made the
+# judgement, which commit they made it against, and that they covered every candidate.
+#
+# See actions/gate/action.yml for why this lives here rather than in the repository
+# being gated. It applies with more force to this one: this action holds
+# `statuses: write`, and when the candidate list came from a script the pull request
+# could edit, a pull request could simply report no candidates and mark itself green.
+
+inputs:
+  token:
+    description: Token used to read comments and write the commit status.
+    required: true
+  register-prefix:
+    description: >-
+      The line prefix a reviewer's disposition comment must start with. A comment not
+      matching this is not a disposition and is ignored entirely.
+    required: false
+    default: 'example-log:'
+  status-context:
+    description: Name of the commit status this action writes.
+    required: false
+    default: 'acknowledgement-gate'
+
+runs:
+  using: composite
+  steps:
+    - name: Resolve the pull request
+      id: ctx
+      uses: actions/github-script@v7
+      with:
+        github-token: ${{ inputs.token }}
+        script: |
+          const {owner, repo} = context.repo;
+          const number = context.eventName === 'pull_request'
+            ? context.payload.pull_request.number
+            : context.payload.issue.number;
+          const pr = await github.rest.pulls.get({owner, repo, pull_number: number});
+          core.setOutput('number', String(number));
+          core.setOutput('head_sha', pr.data.head.sha);
+          core.setOutput('base_sha', pr.data.base.sha);
+          core.setOutput('author', pr.data.user.login);
+
+    - name: Compute candidates
+      shell: bash
+      env:
+        BASE_SHA: ${{ steps.ctx.outputs.base_sha }}
+        HEAD_SHA: ${{ steps.ctx.outputs.head_sha }}
+      run: |
+        python3 "${GITHUB_ACTION_PATH}/../../scripts/licence-gate.py" --candidates \
+          "$BASE_SHA" "$HEAD_SHA" > /tmp/candidates.txt || true
+        cat /tmp/candidates.txt
+
+    - name: Verify the acknowledgement
+      uses: actions/github-script@v7
+      env:
+        PR_NUMBER: ${{ steps.ctx.outputs.number }}
+        HEAD_SHA: ${{ steps.ctx.outputs.head_sha }}
+        PR_AUTHOR: ${{ steps.ctx.outputs.author }}
+        REGISTER_PREFIX: ${{ inputs.register-prefix }}
+        STATUS_CONTEXT: ${{ inputs.status-context }}
+      with:
+        github-token: ${{ inputs.token }}
+        script: |
+          const fs = require('fs');
+          const {owner, repo} = context.repo;
+          const number = Number(process.env.PR_NUMBER);
+          const headSha = process.env.HEAD_SHA;
+          const author  = process.env.PR_AUTHOR;
+          const statusContext = process.env.STATUS_CONTEXT;
+
+          // The prefix is configuration, not a pattern - escape it before it becomes
+          // one, or a consumer's punctuation silently changes what matches.
+          const prefix = process.env.REGISTER_PREFIX
+            .replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+          const shapeRe = new RegExp(`^\\s*${prefix}`, 'mi');
+
+          const candidates = fs.readFileSync('/tmp/candidates.txt', 'utf8')
+            .split('\n').map(s => s.trim()).filter(Boolean);
+
+          const setStatus = async (state, description) => {
+            await github.rest.repos.createCommitStatus({
+              owner, repo, sha: headSha, state,
+              context: statusContext,
+              description: description.substring(0, 138),
+            });
+            core.info(`${state}: ${description}`);
+            if (state === 'failure') core.setFailed(description);
+          };
+
+          if (candidates.length === 0) {
+            await setStatus('success', 'No replacement candidates detected.');
+            return;
+          }
+
+          // Comment bodies are attacker-controlled. They are only ever read as data
+          // here - never interpolated into a shell - and authorisation is checked
+          // against the collaborator permission API, never author_association, which
+          // reports organisation membership rather than access to this repository.
+          const comments = await github.paginate(github.rest.issues.listComments,
+            {owner, repo, issue_number: number, per_page: 100});
+
+          const shaped = comments.filter(c => shapeRe.test(c.body || ''));
+
+          // Eligibility is decided BEFORE selection, and this ordering is the whole
+          // point. Taking the newest correctly-shaped comment and then testing whether
+          // its author was allowed hands anyone who can comment a veto: post one line
+          // of the register prefix on a pull request that already carries a valid
+          // disposition and the gate fails for ever, because the only comment it will
+          // ever look at is theirs. Filter first, select second, and an ineligible
+          // comment is inert rather than obstructive.
+          const eligible = [];
+          const ignored = [];
+          for (const c of shaped) {
+            const login = c.user.login;
+            if (login === author) {
+              // Not an attack - the author acting in good faith. Distinguished from a
+              // stranger below so the reported reason stays useful to them.
+              ignored.push({login, why: 'is the pull request author'});
+              continue;
+            }
+            let perm = 'none';
+            try {
+              const r = await github.rest.repos.getCollaboratorPermissionLevel(
+                {owner, repo, username: login});
+              perm = r.data.permission;
+            } catch (e) { perm = 'none'; }
+            if (!['admin', 'write', 'maintain'].includes(perm)) {
+              core.warning(
+                `IGNORED disposition from ${login} (permission: ${perm}) on #${number}`);
+              ignored.push({login, why: `lacks write access (${perm})`});
+              continue;
+            }
+            eligible.push(c);
+          }
+
+          if (eligible.length === 0) {
+            // The reason is only ever reported for the author's own attempt. For a
+            // stranger the status stays exactly as it was before they commented -
+            // they learn nothing, and they have changed nothing.
+            const byAuthor = ignored.find(i => i.login === author);
+            await setStatus(byAuthor ? 'failure' : 'pending',
+              byAuthor
+                ? `Disposition must come from a reviewer, not the pull request author (${author}).`
+                : `${candidates.length} candidate(s) await a reviewer disposition.`);
+            return;
+          }
+
+          const ack = eligible[eligible.length - 1];
+          const who = ack.user.login;
+
+          // Staleness: an acknowledgement made before the current head does not carry
+          // over. Otherwise the bypass is trivial - acknowledge a clean tree, then push.
+          const prAtAck = await github.rest.pulls.listCommits(
+            {owner, repo, pull_number: number, per_page: 250});
+          const shaTimes = new Map(prAtAck.data.map(c =>
+            [c.sha, new Date(c.commit.committer.date).getTime()]));
+          const headTime = shaTimes.get(headSha) || 0;
+          if (new Date(ack.created_at).getTime() < headTime) {
+            await setStatus('failure',
+              `Disposition predates the current head ${headSha.substring(0,9)}; re-confirm.`);
+            return;
+          }
+
+          const body = ack.body;
+          const missing = candidates.filter(p => !body.includes(p));
+          if (missing.length) {
+            await setStatus('failure', `Not dispositioned: ${missing.join(', ')}`);
+            return;
+          }
+
+          await setStatus('success',
+            `${candidates.length} candidate(s) dispositioned by ${who}.`);

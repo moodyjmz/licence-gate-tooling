@@ -1,0 +1,123 @@
+name: Apply standard licence headers
+description: >-
+  Apply a licence header to new files on a reviewer's explicit assertion of
+  authorship. The licence follows from the path; the copyright does not.
+
+# The command means "we wrote these", which is an assertion no machine can make.
+# This action records the claim, attributes it to the person who made it, and derives
+# only the *licence* - which is a function of where the file sits in the tree.
+#
+# It refuses anything it cannot determine. Refusal is a first-class outcome here: a
+# wrong header looks settled, so nobody ever re-examines it.
+
+inputs:
+  token:
+    description: Token with write access to the pull request branch.
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Authorise and extract the asserted paths
+      id: ctx
+      uses: actions/github-script@v7
+      with:
+        github-token: ${{ inputs.token }}
+        script: |
+          const fs = require('fs');
+          const {owner, repo} = context.repo;
+          const who = context.payload.comment.user.login;
+          let perm = 'none';
+          try {
+            const r = await github.rest.repos.getCollaboratorPermissionLevel(
+              {owner, repo, username: who});
+            perm = r.data.permission;
+          } catch (e) { perm = 'none'; }
+          if (!['admin','write','maintain'].includes(perm)) {
+            // Silence is the answer. See actions/auto-fix: a reply tells a prober the
+            // command exists and that permission was the only obstacle. Recorded where
+            // only people with repository access can see it.
+            core.warning(
+              `IGNORED /std-licence from ${who} (permission: ${perm}) on #${context.issue.number}`);
+            await core.summary
+              .addHeading('Ignored an unauthorised command', 3)
+              .addTable([
+                [{data: 'Command', header: true}, {data: 'Commenter', header: true},
+                 {data: 'Permission', header: true}, {data: 'Pull request', header: true}],
+                ['/std-licence', who, perm || 'none', `#${context.issue.number}`],
+              ])
+              .write();
+            core.setOutput('ok', 'false');
+            return;
+          }
+          // Comment text is data, never shell input. Paths go to a file.
+          const body = context.payload.comment.body || '';
+          const line = body.split('\n').find(l => l.includes('/std-licence')) || '';
+          const paths = line.replace('/std-licence','').trim().split(/\s+/).filter(Boolean);
+          fs.writeFileSync('/tmp/explicit-paths.txt', paths.join('\n'));
+          const pr = await github.rest.pulls.get(
+            {owner, repo, pull_number: context.issue.number});
+          core.setOutput('ok',
+            String(pr.data.head.repo.full_name === `${owner}/${repo}`));
+          core.setOutput('ref', pr.data.head.ref);
+          core.setOutput('base_sha', pr.data.base.sha);
+          if (pr.data.head.repo.full_name !== `${owner}/${repo}`) {
+            core.setFailed('Fork pull requests cannot be written to by this action.');
+          }
+
+    - name: Check out the pull request branch
+      if: steps.ctx.outputs.ok == 'true'
+      uses: actions/checkout@v4
+      with:
+        ref: ${{ steps.ctx.outputs.ref }}
+        fetch-depth: 0
+        token: ${{ inputs.token }}
+
+    - name: Apply
+      if: steps.ctx.outputs.ok == 'true'
+      shell: bash
+      env:
+        BASE_SHA: ${{ steps.ctx.outputs.base_sha }}
+      run: |
+        python3 "${GITHUB_ACTION_PATH}/../../scripts/apply-std-licence.py" \
+          "$BASE_SHA" HEAD > /tmp/report.md
+        cat /tmp/report.md
+
+    - name: Commit if anything changed
+      if: steps.ctx.outputs.ok == 'true'
+      shell: bash
+      env:
+        ASSERTED_BY: ${{ github.event.comment.user.login }}
+        REF: ${{ steps.ctx.outputs.ref }}
+      run: |
+        if [ -z "$(git status --porcelain)" ]; then
+          echo "nothing to commit"; exit 0
+        fi
+        git config user.name "github-actions[bot]"
+        git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+        git add -A
+        {
+          echo "chore(license): add licence headers to new files"
+          echo
+          echo "Applied on an explicit assertion of authorship. The licence for"
+          echo "each file follows from its path; the copyright line reflects the"
+          echo "assertion below, which a machine cannot make and did not."
+          echo
+          echo "Authorship-asserted-by: ${ASSERTED_BY}"
+        } > /tmp/msg.txt
+        git commit -s -F /tmp/msg.txt
+        git push origin "HEAD:${REF}"
+
+    - name: Report
+      if: steps.ctx.outputs.ok == 'true'
+      uses: actions/github-script@v7
+      with:
+        github-token: ${{ inputs.token }}
+        script: |
+          const fs = require('fs');
+          const {owner, repo} = context.repo;
+          const who = context.payload.comment.user.login;
+          const body = fs.readFileSync('/tmp/report.md','utf8');
+          await github.rest.issues.createComment({owner, repo,
+            issue_number: context.issue.number,
+            body: `**Authorship asserted by @${who}.**\n\n${body}`});
