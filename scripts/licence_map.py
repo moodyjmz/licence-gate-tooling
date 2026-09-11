@@ -17,6 +17,7 @@ is "a human decides", never a guess - a wrong header looks settled and nobody
 re-examines it.
 """
 
+import collections
 import re
 
 DEFAULT_LICENCE = "Example-1.0"
@@ -60,10 +61,17 @@ def licence_for(path):
 def classify(path, explicitly_named, has_header):
     """Decide what to do with one new file.
 
-    `explicitly_named` is True when the human named this exact path in the command,
-    rather than relying on the blanket form. Assets require that: source files a
-    contributor adds are usually theirs, whereas icons and fonts are the things
-    people copy, which is precisely where a false copyright claim comes from.
+    `explicitly_named` is True when the human named this exact path in the command.
+    EVERY file requires that. An earlier version required it only for assets, on the
+    reasoning that contributors usually write their own source while icons and fonts
+    are the things people copy. That reasoning is sound on average and worthless as a
+    safeguard: it was defeated by putting third-party code in a `.js` file. The file
+    said in its own comment that it was copied from elsewhere, and a blanket command
+    stamped our copyright directly above that sentence.
+
+    An assertion of authorship has to name what it is asserting. "Everything in this
+    pull request is ours" is not a claim anyone has actually checked, and the whole
+    point of this command is to record a claim someone is willing to stand behind.
 
     Returns (action, licence_or_None, reason).
     """
@@ -74,15 +82,166 @@ def classify(path, explicitly_named, has_header):
     if lic is None:
         return (REFUSE, None, "outside the licence map; determine this by hand")
 
-    if ASSET_RE.search(path) and not explicitly_named:
+    if not explicitly_named:
         return (REFUSE, None,
-                "asset - name it explicitly to assert it is ours, since assets are "
-                "what tends to get copied")
+                "not named in the command - an assertion of authorship must name the "
+                "file it is asserting, whatever type it is")
 
     if not (SOURCE_RE.search(path) or ASSET_RE.search(path)):
         return (REFUSE, None, "not a source or asset file; decide by hand whether it needs a header")
 
     return (APPLY, lic, "")
+
+
+# THE one definition of "this line asserts ownership". Everything that needs to know
+# whether a file carries a header asks this, and nothing re-implements it.
+#
+# There were three implementations before, and they disagreed. The gate looked for
+# `Copyright (c)` or `licensed under the`; the stamping tool wrote SPDX tags; a third
+# check tested for the literal string `SPDX-License-Identifier` in the first 15 lines.
+# The consequence was not cosmetic: a file stamped by our own tool matched none of the
+# gate's patterns, so it became permanently invisible to both blocking checks. Its
+# licence could then be deleted outright and the report would certify that nothing had
+# been altered. The tool that writes headers and the tool that enforces them have to
+# agree on what one looks like.
+#
+# The pattern required the literal word "copyright" before any (c)/©/year, and that
+# was a live false all-clear rather than a theoretical gap. `© 2020 Example Corp`,
+# `(c) 2020 Example Corp` and `(C) 2020 Example Corp, all rights reserved` are all
+# ordinary header forms and all three matched nothing - so deleting such a line
+# passed the gate, and the report said, under "you need not check these", that no
+# copyright line had been altered. That is the exact failure this tool exists to
+# prevent, and it needed no attacker: the © form is what most European vendors ship.
+#
+# Broadening it has a boundary that must hold. A looser pattern - anything containing
+# "copyright" - made the gate flag its own prose, and a compliance gate that fires on
+# documentation is a gate people learn to click past. TestHeaderCorpus below is the
+# statement of scope: a list of real header styles that must match and a list of
+# prose lines that must not. The regex is whatever satisfies that list; the list is
+# the specification. Add to it before you touch this.
+#
+# Two deliberate narrowings inside the broadening, both from running the pattern over
+# ordinary text:
+#   * a bare `(c)` needs a following year. `(c)` on its own is a list marker - "(a)
+#     keep, (b) drop, (c) defer" - and matching it would fire on every enumeration.
+#   * `©` takes a year or a capitalised word after it, so "the © symbol" is prose
+#     while "© Example Corp" is a claim.
+# Multi-line licence bodies are matched on a SHORT leading fragment only, because this
+# predicate is handed single lines by check_b and by apply_fix's anchor scan as well
+# as a joined region: a phrase long enough to wrap in a real header matches nothing.
+HEADER_RE = re.compile(
+    r"("
+    r"copyright\s*(?:\(c\)|\(\d|©|\d{4}|by\b)"
+    r"|(?:\(c\)|©)\s*\d{4}"
+    r"|©\s*[A-Z]"
+    r"|all rights reserved"
+    r"|licen[sc]ed under"
+    r"|SPDX-FileCopyrightText:"
+    r"|SPDX-License-Identifier:"
+    r"|GNU (?:Lesser |Affero |)General Public License"
+    r"|Permission is hereby granted"
+    r"|Redistribution and use in source"
+    r"|under the terms of the GNU"
+    r"|is free software[:;]"
+    r")",
+    re.I,
+)
+
+
+def has_licence_header(text):
+    """Whether this text asserts ownership. The single predicate; do not re-derive it."""
+    return bool(HEADER_RE.search(text or ""))
+
+
+# One record per line of the leading comment region, in file order.
+#
+#   index      the line's position in content.split("\n"), so a caller can edit it
+#   kind       "blank", "line" (a // or # comment) or "block" (inside /* */, <!-- -->)
+#   token      the marker a "line" uses, or the closing token a "block" needs
+#   closes_at  for a "block" line that contains its closing token, the column that
+#              token starts at; None otherwise
+CommentLine = collections.namedtuple("CommentLine", "index kind token closes_at")
+
+_BLOCK_STYLES = (("/*", "*/"), ("<!--", "-->"))
+
+
+def leading_comment_lines(content):
+    """Classify every line of the file's leading comment region.
+
+    The scan already had to track block-open/close state to know where the region
+    ended; it simply threw that away and returned text. Anything that then wanted to
+    know whether a given line was inside a block comment had to re-derive it, and
+    re-deriving it per line is guessing: apply_fix matched the leading `*` of a
+    block-comment body with a LINE-comment marker pattern and appended the
+    modification notice after the `*/`, i.e. outside the comment, as a bare
+    statement. `node --check` rejected the result and /auto-fix committed and pushed
+    it. The state is knowable, so hand it out rather than making callers guess.
+    """
+    lines = content.split("\n")
+    i = 0
+    if lines and any(p.match(lines[0]) for p in _MUST_STAY_FIRST):
+        i = 1
+    out, closing = [], None
+    while i < len(lines):
+        line = lines[i]
+        stripped = line.strip()
+        if closing:
+            at = line.find(closing)
+            out.append(CommentLine(i, "block", closing, at if at >= 0 else None))
+            if at >= 0:
+                closing = None
+            i += 1
+            continue
+        if not stripped:
+            out.append(CommentLine(i, "blank", None, None))
+            i += 1
+            continue
+        opener = next((o for o, _ in _BLOCK_STYLES if stripped.startswith(o)), None)
+        if opener:
+            closer = dict(_BLOCK_STYLES)[opener]
+            at = line.find(closer, line.find(opener) + len(opener))
+            out.append(CommentLine(i, "block", closer, at if at >= 0 else None))
+            if at < 0:
+                closing = closer
+            i += 1
+            continue
+        if stripped.startswith("*"):
+            # A block-comment body or closer whose opener is not in view - a file
+            # that begins mid-comment. Kept in the region (dropping it would shrink
+            # what counts as a header, and under-detection is the failure nobody
+            # notices), but recorded as block rather than as a line comment: its `*`
+            # is not a comment marker that can be repeated on a new line.
+            at = line.find("*/")
+            out.append(CommentLine(i, "block", "*/", at if at >= 0 else None))
+            i += 1
+            continue
+        marker = next((m for m in ("//", "#") if stripped.startswith(m)), None)
+        if marker:
+            out.append(CommentLine(i, "line", marker, None))
+            i += 1
+            continue
+        break
+    return out
+
+
+def leading_comment_region(content):
+    """The file's leading comment block: where a file's own licence header lives.
+
+    This replaces a fixed 40-line window. The window was not arbitrary - it encoded
+    the real rule that a file's header sits at the top - but the number was, and 45
+    lines of filler comment pushed a header past it, so the gate concluded the file
+    had no header and demanded no modification notice.
+
+    Scanning the whole file instead would be worse, not better. Any file quoting a
+    licence in prose, or a vendored bundle carrying per-section headers far down,
+    would start registering as "has a header" and demanding notices it does not need.
+    False positives are how people learn to click past a compliance gate.
+
+    So keep the rule and drop the number: read from the top until the first line that
+    is neither blank nor part of a comment.
+    """
+    lines = content.split("\n")
+    return "\n".join(lines[r.index] for r in leading_comment_lines(content))
 
 
 def header_texts(licence):
