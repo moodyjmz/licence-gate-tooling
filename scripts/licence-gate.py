@@ -17,7 +17,7 @@ Writes a markdown report to stdout and exits non-zero if A or B failed.
 import re
 import sys
 
-from git_io import GateError, changed_files, git_show
+from git_io import GateError, changed_files, git_show, sh_strict
 from licence_map import (has_licence_header, leading_comment_lines,
                          leading_comment_region)
 
@@ -98,6 +98,24 @@ def looks_binary(text):
     if "\x00" in text:
         return True
     return text.count("\ufffd") > max(8, len(text) // 200)
+
+
+def resolve(rev):
+    """A ref as its commit SHA.
+
+    The disposition block prints this for the reviewer to copy, and the acknowledgement
+    gate compares what they wrote against the head SHA. Printing the ref verbatim meant
+    a caller passing a branch name put a branch name in the block: the reviewer would
+    follow the instructions exactly and be told, for ever, that their disposition did
+    not name the current head.
+
+    Falls back to the input if git cannot resolve it. A slightly wrong line in a report
+    is better than a report that does not appear.
+    """
+    try:
+        return sh_strict("git", "rev-parse", rev).strip() or rev
+    except GateError:
+        return rev
 
 
 def check_b(base, head, pairs):
@@ -611,23 +629,47 @@ def main(argv, author=None):
                    "merge.**\n")
 
     if c:
-        out.append(f"### A reviewer must answer these — {len(c)} candidate(s)\n")
+        out.append("### A reviewer must answer these — {}\n".format(
+            "1 candidate" if len(c) == 1 else "{} candidates".format(len(c))))
         out.append("These *may* be replacement events. Detection over-reports on "
                    "purpose; deciding is a human judgement, so every one needs an "
                    "answer, including \"no\".\n")
         for p, why in c:
             out.append(f"- `{p}` — {why}")
-        out.append("\n**How to resolve:** a reviewer — not the pull request author — "
-                   "replies with a disposition for every path. Use a register ID where it "
-                   "is a replacement, or `not a replacement` where it is not. The commit "
-                   "line is required: it is what ties your signature to the tree you "
-                   "actually looked at.\n")
+        # Say what to DO first, and only then what it means. This block described its
+        # own purpose - "the commit line is required: it is what ties your signature to
+        # the tree you actually looked at" - which is true, reads as homework, and
+        # never mentions that the line is already filled in. The first person to meet
+        # it asked what a register was and whether they had to go and find the commit.
+        # Neither question should have been possible: there is nothing to look up and
+        # nothing to compose.
+        out.append("\n**What to do — four steps, nothing to look up:**\n")
+        out.append("1. Copy the block below.")
+        out.append("2. Paste it into the comment box at the bottom of this pull request.")
+        out.append("3. After each `->`, type your answer.")
+        out.append("4. Post the comment.\n")
+        out.append("The check re-runs on its own within a minute or so and turns green. "
+                   "You do not need to do anything else, and nobody has to re-run it "
+                   "for you.\n")
         out.append("```\nexample-log:")
-        out.append(f"  commit: {head[:9]}")
+        # Resolve, never echo. This printed whatever ref it was handed, so a caller
+        # passing a branch name put a branch name in the block the reviewer copies -
+        # while the acknowledgement gate compares against the head SHA. The reviewer
+        # would have followed the instructions exactly and been told, for ever, that
+        # their disposition did not name the current head.
+        out.append(f"  commit: {resolve(head)[:9]}")
         for p, _ in c:
             out.append(f"  {p} -> ")
         out.append("```")
-        out.append("")
+        out.append("\nAn answer is either a **register ID** (if the file replaces "
+                   "something) or the words **`not a replacement`** (if it does not). "
+                   "Every line needs one — a blank is not an answer, and the gate will "
+                   "say so.\n")
+        out.append("The `commit:` line is already filled in; leave it as it is. It "
+                   "records which version you read, so if anyone pushes again your "
+                   "sign-off lapses instead of silently covering code you never saw.\n")
+        out.append("It cannot be the pull request's author who posts this. The record is "
+                   "only worth having because a second person looked.\n")
 
     # Every line in this section tells the reviewer not to look, so it may only carry
     # claims the run actually established. Binary blobs are skipped by check_b - they
