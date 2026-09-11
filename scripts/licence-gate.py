@@ -25,6 +25,21 @@ NOTICE = "Modified by the Example project."
 
 # Tooling and documentation discuss licences without being licensed material.
 IGNORE_RE = re.compile(r"^(scripts/|\.github/|README\.md$|docs?/)")
+# Third-party trees we carry but do not maintain. Their headers are upstream's, not
+# ours, so the two BLOCKING checks do not apply to them - and applying them was not a
+# theoretical problem. An ordinary dependency bump rewrites vendored files, which
+# removes upstream's old copyright line and adds their new one, and the gate blocked
+# with two instructions nobody could follow: "restore the licence line" (upstream
+# changed their own year, legitimately) and "add the modification notice" (we did not
+# modify it, upstream did). The pull request was opened by a bot that cannot answer
+# either, so the only way out was a human overriding the gate - which teaches everyone
+# that overriding the gate is a normal thing to do.
+#
+# They are NOT ignored, though. A change under here is a third-party version landing
+# in our tree, which is the single most interesting thing a reviewer could be told
+# about, so check_c always raises it. Same routing as binaries: out of the blocking
+# path, into the human one.
+VENDOR_RE = re.compile(r"^(vendor/|vendors/|third[_-]party/|node_modules/|external/)")
 SOURCE_RE = re.compile(r"\.(js|ts|py|c|h|cpp|css|less|java|go|rb|sh)$", re.I)
 # Text that is not licensed material in its own right and is not a replaceable asset.
 TEXT_RE = re.compile(r"\.(md|txt|json|ya?ml|toml|ini|cfg|lock)$|^[^.]+$", re.I)
@@ -177,6 +192,8 @@ def check_b(base, head, pairs):
     for old_path, new_path, old_is_link, new_is_link in pairs:
         if both_ends_ignorable(old_path, new_path):
             continue
+        if all(VENDOR_RE.match(e) for e in (old_path, new_path) if e):
+            continue
         # WHICH END has no blob decides what happens, and getting this symmetrical was
         # a bug caught before it shipped: skipping a pair because the PATH appeared in
         # the union `gitlinks` set made replacing a licensed file with a submodule
@@ -249,7 +266,7 @@ def check_a(base, head, modified, base_paths=None, gitlinks=()):
         # notice on every edit, and /auto-fix cannot supply one because a Markdown file
         # has no comment block to close. That blocks a pull request on a requirement
         # nothing can satisfy, which is how a gate loses its audience.
-        if IGNORE_RE.match(p):
+        if IGNORE_RE.match(p) or VENDOR_RE.match(p):
             continue
         # A submodule has no content in this repository, so there is nowhere to put a
         # notice and nothing to read. It is not silently dropped: check_c and check_d
@@ -341,6 +358,11 @@ def check_c(added, modified, deleted, renamed, gitlinks=(), binary_skips=()):
     # replacement candidates detected" - a false all-clear on the one thing this tool
     # is for.
     seen = {p for p, _ in cands}
+    for p in list(added) + list(modified) + list(deleted):
+        if VENDOR_RE.match(p) and p not in seen:
+            cands.append((p, "third-party tree changed - upstream content landing in "
+                             "our repository, which is a replacement whoever did it"))
+            seen.add(p)
     for p in sorted(gitlinks):
         if p not in seen:
             cands.append((p, "submodule (gitlink) added or changed - its content lives "
@@ -352,6 +374,11 @@ def check_c(added, modified, deleted, renamed, gitlinks=(), binary_skips=()):
     # extension rules to have covered them. A binary named .js would otherwise be
     # skipped by check_b and classified as source by check_c, and vanish between them.
     seen = {p for p, _ in cands}
+    for p in list(added) + list(modified) + list(deleted):
+        if VENDOR_RE.match(p) and p not in seen:
+            cands.append((p, "third-party tree changed - upstream content landing in "
+                             "our repository, which is a replacement whoever did it"))
+            seen.add(p)
     for p in binary_skips:
         if p not in seen:
             cands.append((p, "binary content changed - no line-level check is possible, "
@@ -562,10 +589,9 @@ def main(argv, author=None):
                          "1 file" if len(a) == 1 else "{} files".format(len(a)))))
     if d_src:
         todo.append(("anyone with write access",
-                     "give {} a licence header — by hand, since only a person knows "
-                     "where the content came from".format(
-                         "1 new file" if len(d_src) == 1 else
-                         "{} new files".format(len(d_src)))))
+                     "say who wrote {} and let the header be applied — see below"
+                     .format("1 new file" if len(d_src) == 1
+                             else "{} new files".format(len(d_src)))))
     if c:
         subject = ("the candidate below" if len(c) == 1
                    else "every one of the {} candidates below".format(len(c)))
@@ -624,9 +650,23 @@ def main(argv, author=None):
                        f"which licence is it being vendored?")
         out.append("\n`/auto-fix` deliberately will not touch these: the right "
                    "copyright holder depends on where the content came from, and "
-                   "guessing is how someone else's work ends up carrying yours. Add a "
-                   "header by hand if one is wanted — **none of this blocks the "
-                   "merge.**\n")
+                   "guessing is how someone else's work ends up carrying yours.\n")
+        if d_src:
+            # The report said "by hand" while the command that does it existed and went
+            # unmentioned. A tool nobody is told about is a tool nobody uses, and the
+            # instruction it replaced was the vaguest sentence in the whole report.
+            named = " ".join(d_src)
+            out.append("**If these are ours, say so and the headers are applied:** post "
+                       "a comment reading\n")
+            out.append("```\n/std-licence {}\n```".format(named))
+            out.append("\nThat command is an assertion — *we wrote these* — which is why "
+                       "it names every file rather than taking them all in one sweep, "
+                       "and why a machine cannot issue it. The licence follows from "
+                       "where each file sits in the tree; the copyright line records "
+                       "your word for it.\n")
+            out.append("If any of them is **not** ours — vendored, copied, generated "
+                       "from something else — leave it out and add its real header by "
+                       "hand.\n")
 
     if c:
         out.append("### A reviewer must answer these — {}\n".format(

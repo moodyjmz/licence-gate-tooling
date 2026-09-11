@@ -674,5 +674,54 @@ class TestOneDiffEnumerator(GateCase):
                           "a path git would have C-quoted must still be stamped")
 
 
+class TestAutomatedDependencyUpdates(GateCase):
+    """A gate that blocks the bot everybody has running is a gate that gets disabled."""
+
+    def test_a_dependency_bump_does_not_block(self):
+        """Verified against a realistic Dependabot-shaped change. Rewriting a vendored
+        file removes upstream's old copyright line and adds their new one, so the gate
+        demanded two things nobody could do: "restore the licence line" - upstream
+        changed their own year, legitimately - and "add the modification notice" - we
+        did not modify it. The author is a bot that cannot answer either, so the only
+        exit was a human overriding the gate, which teaches the team that overriding
+        the gate is routine."""
+        self.write("vendor/leftpad/index.js",
+                   "/*\n * Copyright (c) 2019 Upstream Authors\n"
+                   " * Licensed under the MIT License\n */\nmodule.exports=1;\n")
+        self.write("package-lock.json", '{"packages":{"leftpad":{"version":"1.2.0"}}}\n')
+        self.commit("base")
+        self.write("vendor/leftpad/index.js",
+                   "/*\n * Copyright (c) 2024 Upstream Authors\n"
+                   " * Licensed under the MIT License\n */\nmodule.exports=2;\n")
+        self.write("package-lock.json", '{"packages":{"leftpad":{"version":"1.3.0"}}}\n')
+        self.commit("bump leftpad 1.2.0 -> 1.3.0")
+        report = self.assertClean("a dependency bump must not block")
+        self.assertIn("vendor/leftpad/index.js", report,
+                      "it must still reach a reviewer - third-party content landing in "
+                      "our tree is the most interesting thing the register records")
+
+    def test_a_lockfile_only_change_is_quiet(self):
+        """The common case. A gate that prompts on every lockfile edit is noise."""
+        self.write("package-lock.json", '{"packages":{"a":{"version":"1.0.0"}}}\n')
+        self.write("src/app.js", "const a = 1;\n")
+        self.commit("base")
+        self.write("package-lock.json", '{"packages":{"a":{"version":"1.1.0"}}}\n')
+        self.commit("bump a")
+        report = self.assertClean("a lockfile edit must not prompt")
+        # Not a bare substring test: "candidate" appears in the standing boilerplate
+        # under "not checked". What matters is that no candidates SECTION was emitted.
+        self.assertNotIn("A reviewer must answer these", report)
+        self.assertIn("Nothing to do", report)
+
+    def test_our_own_code_is_still_checked(self):
+        """The exemption is for trees we do not maintain. Moving a licensed file into
+        vendor/ must not be a way to stop it being checked."""
+        self.write("src/mine.js", LICENSED + "const x = 1;\n")
+        self.commit("base")
+        self.write("src/mine.js", "/*\n */\nconst x = 2;\n")
+        self.commit("strip the header from our own file")
+        self.assertBlocks("our own files are not vendored")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
