@@ -188,7 +188,7 @@ def check_b(base, head, pairs):
     holding, this becomes a hole. `binary_skips` is returned for exactly that reason -
     the caller feeds it to check_c rather than trusting the two to agree.
     """
-    violations, binary_skips = [], []
+    violations, binary_skips, claims = [], [], []
     for old_path, new_path, old_is_link, new_is_link in pairs:
         if both_ends_ignorable(old_path, new_path):
             continue
@@ -226,7 +226,30 @@ def check_b(base, head, pairs):
         for line in before.split("\n"):
             if has_licence_header(line) and line not in present:
                 violations.append((old_path, line.strip()))
-    return violations, binary_skips
+
+        # AND THE OTHER DIRECTION. This check only ever examined removals, so ADDING an
+        # ownership claim was invisible by construction: a pull request could append
+        # `Copyright (c) 2022 Evil Corp / Licensed under the Evil License 6.66` to any
+        # file, carry the modification notice correctly, and be told "Nothing to do -
+        # both checks pass" with the verified box confirming no copyright line had been
+        # altered. Literally true, and useless: nothing was altered because something
+        # was invented.
+        #
+        # Demonstrated end to end by a reviewer, who merged it to main inside an hour.
+        # A red-team run had named the mechanism first and it was judged a documented
+        # limitation, which it was not - "we only report deletions" describes the code,
+        # not the guarantee anyone believes they have.
+        #
+        # Not blocking, deliberately. A contributor adding their own copyright line is
+        # a legitimate thing to do in plenty of projects, and blocking would leave them
+        # no way to say so. It goes to the reviewer, who can. Absent from the base and
+        # present in the head is the whole test; the modification notice does not match
+        # HEADER_RE, so the tool's own additions do not trip it.
+        was_there = set(before.split("\n"))
+        for line in after.split("\n"):
+            if has_licence_header(line) and line not in was_there:
+                claims.append((new_path or old_path, line.strip()))
+    return violations, binary_skips, claims
 
 
 def read_at(rev, path, what):
@@ -333,7 +356,8 @@ def check_d(head, added, gitlinks=()):
     return needing, assets, links
 
 
-def check_c(added, modified, deleted, renamed, gitlinks=(), binary_skips=()):
+def check_c(added, modified, deleted, renamed, gitlinks=(), binary_skips=(),
+            claims=()):
     """Candidate replacement events. Over-detects by design."""
     cands = []
     for old, new in renamed:
@@ -358,6 +382,11 @@ def check_c(added, modified, deleted, renamed, gitlinks=(), binary_skips=()):
     # replacement candidates detected" - a false all-clear on the one thing this tool
     # is for.
     seen = {p for p, _ in cands}
+    for path, line in claims:
+        if path not in seen:
+            cands.append((path, "a NEW ownership or licence claim appears in this file "
+                                "— only a person can say whether it is true"))
+            seen.add(path)
     for p in list(added) + list(modified) + list(deleted):
         if VENDOR_RE.match(p) and p not in seen:
             cands.append((p, "third-party tree changed - upstream content landing in "
@@ -374,6 +403,11 @@ def check_c(added, modified, deleted, renamed, gitlinks=(), binary_skips=()):
     # extension rules to have covered them. A binary named .js would otherwise be
     # skipped by check_b and classified as source by check_c, and vanish between them.
     seen = {p for p, _ in cands}
+    for path, line in claims:
+        if path not in seen:
+            cands.append((path, "a NEW ownership or licence claim appears in this file "
+                                "— only a person can say whether it is true"))
+            seen.add(path)
     for p in list(added) + list(modified) + list(deleted):
         if VENDOR_RE.match(p) and p not in seen:
             cands.append((p, "third-party tree changed - upstream content landing in "
@@ -533,8 +567,9 @@ def main(argv, author=None):
     base_paths.update({new: old for old, new in renamed})
 
     if candidates_only:
-        _, binary_skips = check_b(base, head, pairs)
-        for p, _ in check_c(added, modified, deleted, renamed, gitlinks, binary_skips):
+        _, binary_skips, claims = check_b(base, head, pairs)
+        for p, _ in check_c(added, modified, deleted, renamed, gitlinks,
+                            binary_skips, claims):
             print(p)
         return 0
 
@@ -549,9 +584,9 @@ def main(argv, author=None):
             print(f"could not auto-fix: {p}", file=sys.stderr)
         return 0 if not unfixable else 3
 
-    b, binary_skips = check_b(base, head, pairs)
+    b, binary_skips, claims = check_b(base, head, pairs)
     a = check_a(base, head, modified_for_a, base_paths, gitlinks)
-    c = check_c(added, modified, deleted, renamed, gitlinks, binary_skips)
+    c = check_c(added, modified, deleted, renamed, gitlinks, binary_skips, claims)
     d_src, d_assets, d_links = check_d(head, added, gitlinks)
 
     out = []
@@ -592,6 +627,10 @@ def main(argv, author=None):
                      "say who wrote {} and let the header be applied — see below"
                      .format("1 new file" if len(d_src) == 1
                              else "{} new files".format(len(d_src)))))
+    if claims:
+        todo.append(("a reviewer",
+                     "confirm or reject {} new ownership claim(s) this pull request adds "
+                     "to existing files".format(len(claims))))
     if c:
         subject = ("the candidate below" if len(c) == 1
                    else "every one of the {} candidates below".format(len(c)))
@@ -667,6 +706,18 @@ def main(argv, author=None):
             out.append("If any of them is **not** ours — vendored, copied, generated "
                        "from something else — leave it out and add its real header by "
                        "hand.\n")
+
+    if claims:
+        out.append("### Ownership claimed — {} new line(s)\n".format(len(claims)))
+        out.append("Someone has **added** a copyright or licence statement. Nothing was "
+                   "removed, so the checks above have nothing to say about it — but a "
+                   "file now asserts something it did not assert before, and only a "
+                   "person can tell whether that is true.\n")
+        for path, line in claims:
+            out.append("- `{}`\n  ```\n  {}\n  ```".format(path, line))
+        out.append("\nIf it is right — a contributor recording their own copyright, a "
+                   "header added deliberately — say so in the disposition below. If it "
+                   "is not, remove the line.\n")
 
     if c:
         out.append("### A reviewer must answer these — {}\n".format(

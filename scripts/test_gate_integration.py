@@ -723,5 +723,53 @@ class TestAutomatedDependencyUpdates(GateCase):
         self.assertBlocks("our own files are not vendored")
 
 
+class TestAddedOwnershipClaims(GateCase):
+    """Found by a reviewer, who merged it to main inside an hour of being given access.
+    A red-team run had named the mechanism the round before and it was written off as a
+    documented limitation - "we only report deletions" describes the code, not the
+    guarantee anyone believes they have."""
+
+    def test_an_added_copyright_claim_reaches_a_reviewer(self):
+        """The live bypass: append a second header claiming someone else's ownership,
+        add the modification notice correctly, and the gate said "Nothing to do - both
+        checks pass" with the verified box confirming no copyright line had been
+        altered. True, and useless: nothing was altered because something was invented."""
+        self.write("src/panel.js", LICENSED + 'export function panel(){ return 1; }\n')
+        self.commit("base")
+        self.write("src/panel.js",
+                   LICENSED.replace(" */", " * Modified by the Example project.\n */")
+                   + "\n/**\n * Copyright (c) 2022 Evil Corp\n"
+                     " * Licensed under the Evil License 6.66\n */\n"
+                     'export function panel(){ return 1; }\n')
+        self.commit("claim ownership")
+        code, report = self.run_gate()
+        self.assertIn("Ownership claimed", report,
+                      "an added ownership claim must be surfaced, not ignored")
+        self.assertIn("Evil Corp", report, "say which line, or the reviewer cannot judge")
+        self.assertNotIn("Nothing to do", report)
+
+    def test_the_modification_notice_is_not_an_ownership_claim(self):
+        """The tool's own addition must not trip its own check, or /auto-fix creates
+        work for a reviewer every time it runs."""
+        self.write("src/a.js", LICENSED + "const x = 1;\n")
+        self.commit("base")
+        self.write("src/a.js",
+                   LICENSED.replace(" */", " * Modified by the Example project.\n */")
+                   + "const x = 2;\n")
+        self.commit("add the notice")
+        code, report = self.run_gate()
+        self.assertNotIn("Ownership claimed", report)
+        self.assertEqual(code, 0, report)
+
+    def test_an_unchanged_file_claims_nothing(self):
+        self.write("src/a.js", LICENSED + "const x = 1;\n")
+        self.write("src/b.js", "const y = 1;\n")
+        self.commit("base")
+        self.write("src/b.js", "const y = 2;\n")
+        self.commit("touch an unlicensed file")
+        code, report = self.run_gate()
+        self.assertNotIn("Ownership claimed", report)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
