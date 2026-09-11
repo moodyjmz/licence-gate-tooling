@@ -62,17 +62,38 @@ runs:
             String(pr.data.head.repo.full_name === `${owner}/${repo}`));
           core.setOutput('ref', pr.data.head.ref);
           core.setOutput('base_sha', pr.data.base.sha);
+          // The commit the command was issued against. Checking out the BRANCH would
+          // fetch whatever is at its tip when this step runs, seconds later - so an
+          // author can push new content between the reviewer's comment and the
+          // checkout, and have it stamped under a judgement made about something
+          // else. Pin to the commit; the push at the end is then a fast-forward only
+          // if the branch has not moved, and git refuses it if it has.
+          core.setOutput('head_sha', pr.data.head.sha);
           if (pr.data.head.repo.full_name !== `${owner}/${repo}`) {
             core.setFailed('Fork pull requests cannot be written to by this action.');
           }
 
-    - name: Check out the pull request branch
+    - name: Check out the commit the command was issued against
       if: steps.auth.outputs.ok == 'true'
       uses: actions/checkout@v4
       with:
-        ref: ${{ steps.auth.outputs.ref }}
+        ref: ${{ steps.auth.outputs.head_sha }}
         fetch-depth: 0
         token: ${{ inputs.token }}
+
+    - name: Refuse if the branch moved after the command
+      if: steps.auth.outputs.ok == 'true'
+      shell: bash
+      env:
+        HEAD_SHA: ${{ steps.auth.outputs.head_sha }}
+        REF: ${{ steps.auth.outputs.ref }}
+      run: |
+        remote="$(git ls-remote origin "refs/heads/${REF}" | cut -f1)"
+        if [ "$remote" != "$HEAD_SHA" ]; then
+          echo "Branch moved from ${HEAD_SHA} to ${remote} after the command was issued."
+          echo "Refusing: the fix would land on a tree nobody asked about."
+          exit 1
+        fi
 
     - name: Apply the fix
       if: steps.auth.outputs.ok == 'true'
@@ -81,10 +102,17 @@ runs:
       env:
         BASE_SHA: ${{ steps.auth.outputs.base_sha }}
       run: |
+        set +e
         python3 "${GITHUB_ACTION_PATH}/../../scripts/licence-gate.py" --fix \
-          "$BASE_SHA" HEAD > /tmp/fixed.txt
-        echo "count=$(wc -l < /tmp/fixed.txt | tr -d ' ')" >> "$GITHUB_OUTPUT"
+          "$BASE_SHA" HEAD > /tmp/fixed.txt 2> /tmp/unfixable.txt
+        rc=$?
         cat /tmp/fixed.txt
+        cat /tmp/unfixable.txt >&2
+        # Exit 3 means some file could not be fixed. Reporting "nothing to auto-fix"
+        # about a file the gate is actively blocking on is the failure to avoid here.
+        if [ "$rc" != "0" ] && [ "$rc" != "3" ]; then exit "$rc"; fi
+        echo "count=$(wc -l < /tmp/fixed.txt | tr -d ' ')" >> "$GITHUB_OUTPUT"
+        echo "unfixable=$(wc -l < /tmp/unfixable.txt | tr -d ' ')" >> "$GITHUB_OUTPUT"
 
     - name: Commit and push
       if: steps.auth.outputs.ok == 'true' && steps.fix.outputs.count != '0'
@@ -113,6 +141,7 @@ runs:
       uses: actions/github-script@v7
       env:
         COUNT: ${{ steps.fix.outputs.count }}
+        UNFIXABLE: ${{ steps.fix.outputs.unfixable }}
       with:
         github-token: ${{ inputs.token }}
         script: |
@@ -124,8 +153,12 @@ runs:
             core.setFailed('auto-fix did not complete; nothing was applied');
             return;
           }
-          const body = n === '0'
+          const stuck = Number(process.env.UNFIXABLE || '0');
+          let body = n === '0'
             ? 'Nothing to auto-fix — no modified file is missing its notice.'
             : `Applied the modification notice to ${n} file(s). Nothing existing was altered.\n\nNew files and altered licence lines are **not** auto-fixed; those need a human.`;
+          if (stuck) {
+            body += `\n\n**${stuck} file(s) could not be fixed automatically** — see the run log. Add the notice by hand; the gate will clear once it is there.`;
+          }
           await github.rest.issues.createComment(
             {owner, repo, issue_number: context.issue.number, body});

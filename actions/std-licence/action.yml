@@ -61,17 +61,38 @@ runs:
             String(pr.data.head.repo.full_name === `${owner}/${repo}`));
           core.setOutput('ref', pr.data.head.ref);
           core.setOutput('base_sha', pr.data.base.sha);
+          // The commit the command was issued against. Checking out the BRANCH would
+          // fetch whatever is at its tip when this step runs, seconds later - so an
+          // author can push new content between the reviewer's comment and the
+          // checkout, and have it stamped under a judgement made about something
+          // else. Pin to the commit; the push at the end is then a fast-forward only
+          // if the branch has not moved, and git refuses it if it has.
+          core.setOutput('head_sha', pr.data.head.sha);
           if (pr.data.head.repo.full_name !== `${owner}/${repo}`) {
             core.setFailed('Fork pull requests cannot be written to by this action.');
           }
 
-    - name: Check out the pull request branch
+    - name: Check out the commit the command was issued against
       if: steps.ctx.outputs.ok == 'true'
       uses: actions/checkout@v4
       with:
-        ref: ${{ steps.ctx.outputs.ref }}
+        ref: ${{ steps.ctx.outputs.head_sha }}
         fetch-depth: 0
         token: ${{ inputs.token }}
+
+    - name: Refuse if the branch moved after the command
+      if: steps.ctx.outputs.ok == 'true'
+      shell: bash
+      env:
+        HEAD_SHA: ${{ steps.ctx.outputs.head_sha }}
+        REF: ${{ steps.ctx.outputs.ref }}
+      run: |
+        remote="$(git ls-remote origin "refs/heads/${REF}" | cut -f1)"
+        if [ "$remote" != "$HEAD_SHA" ]; then
+          echo "Branch moved from ${HEAD_SHA} to ${remote} after the command was issued."
+          echo "Refusing: this command asserts authorship over a tree that is no longer there."
+          exit 1
+        fi
 
     - name: Apply
       if: steps.ctx.outputs.ok == 'true'

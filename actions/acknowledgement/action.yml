@@ -48,14 +48,29 @@ runs:
           core.setOutput('author', pr.data.user.login);
 
     - name: Compute candidates
+      id: cands
       shell: bash
       env:
         BASE_SHA: ${{ steps.ctx.outputs.base_sha }}
         HEAD_SHA: ${{ steps.ctx.outputs.head_sha }}
       run: |
+        # No `|| true`. That swallowed the exit code, and the only thing then
+        # standing between a gate that could not run and a green "No replacement
+        # candidates detected" was an accident: the failure block went to stdout and
+        # became garbage candidate paths, so the gate failed closed with a nonsense
+        # message. Any later tidy-up that routed errors to stderr, or parsed the file
+        # more carefully, would have turned that accident into a false all-clear on a
+        # pull request nothing had examined.
+        set +e
         python3 "${GITHUB_ACTION_PATH}/../../scripts/licence-gate.py" --candidates \
-          "$BASE_SHA" "$HEAD_SHA" > /tmp/candidates.txt || true
+          "$BASE_SHA" "$HEAD_SHA" > /tmp/candidates.txt 2> /tmp/candidates.err
+        rc=$?
         cat /tmp/candidates.txt
+        cat /tmp/candidates.err >&2
+        if [ "$rc" != "0" ]; then
+          echo "could-not-run=true" >> "$GITHUB_OUTPUT"
+        fi
+        exit 0
 
     - name: Verify the acknowledgement
       uses: actions/github-script@v7
@@ -65,6 +80,7 @@ runs:
         PR_AUTHOR: ${{ steps.ctx.outputs.author }}
         REGISTER_PREFIX: ${{ inputs.register-prefix }}
         STATUS_CONTEXT: ${{ inputs.status-context }}
+        COULD_NOT_RUN: ${{ steps.cands.outputs.could-not-run }}
       with:
         github-token: ${{ inputs.token }}
         script: |
@@ -93,6 +109,16 @@ runs:
             core.info(`${state}: ${description}`);
             if (state === 'failure') core.setFailed(description);
           };
+
+          // An empty candidate list means "nothing to disposition" ONLY when the gate
+          // actually ran. If it did not, the list is empty for the wrong reason, and
+          // "No replacement candidates detected" would mark a pull request clean that
+          // nothing had examined. Checked before the emptiness test, not after.
+          if (process.env.COULD_NOT_RUN === 'true') {
+            await setStatus('failure',
+              'The licence gate could not run, so candidates are unknown. See the run log.');
+            return;
+          }
 
           if (candidates.length === 0) {
             await setStatus('success', 'No replacement candidates detected.');
@@ -155,23 +181,46 @@ runs:
           const ack = eligible[eligible.length - 1];
           const who = ack.user.login;
 
-          // Staleness: an acknowledgement made before the current head does not carry
-          // over. Otherwise the bypass is trivial - acknowledge a clean tree, then push.
-          const prAtAck = await github.rest.pulls.listCommits(
-            {owner, repo, pull_number: number, per_page: 250});
-          const shaTimes = new Map(prAtAck.data.map(c =>
-            [c.sha, new Date(c.commit.committer.date).getTime()]));
-          const headTime = shaTimes.get(headSha) || 0;
-          if (new Date(ack.created_at).getTime() < headTime) {
+          // Staleness. A disposition must name the commit it was made against, and
+          // that commit must be the current head.
+          //
+          // This replaced a timestamp comparison - was the comment created before the
+          // head commit's date - which compared against the commit's COMMITTER DATE.
+          // That field is set by whoever makes the commit (`GIT_COMMITTER_DATE`), so
+          // an author could backdate a push and make a disposition given against an
+          // earlier tree look current. Naming the commit removes the clock from the
+          // question entirely: the reviewer signs for a specific tree, and a new push
+          // produces a different SHA that no existing comment names.
+          //
+          // The gate prints this line pre-filled in the template it asks the reviewer
+          // to copy, so it costs them nothing.
+          const shortSha = headSha.substring(0, 9);
+          if (!ack.body.includes(shortSha) && !ack.body.includes(headSha)) {
             await setStatus('failure',
-              `Disposition predates the current head ${headSha.substring(0,9)}; re-confirm.`);
+              `Disposition does not name the current head ${shortSha}; re-confirm against it.`);
             return;
           }
 
+          // Each candidate needs an ANSWER, not a mention.
+          //
+          // This tested `body.includes(path)` - whether the path appeared anywhere in
+          // the comment. The gate prints a pre-filled template for the reviewer to
+          // copy, listing every candidate followed by a bare `-> `. Copying that
+          // template and posting it without filling anything in satisfied the prefix
+          // check, the commit check, and this one: every path was present, blank arrow
+          // and all. The gate then reported "N candidate(s) dispositioned by X" for a
+          // reviewer who had asserted nothing. That is not an adversary; that is the
+          // ordinary way a person interacts with a template, and the mechanism whose
+          // entire purpose is recording that a human looked would have recorded it
+          // for a human who did not.
           const body = ack.body;
-          const missing = candidates.filter(p => !body.includes(p));
+          const missing = candidates.filter(p => {
+            const escaped = p.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+            return !new RegExp(`^\\s*${escaped}\\s*->\\s*\\S`, 'm').test(body);
+          });
           if (missing.length) {
-            await setStatus('failure', `Not dispositioned: ${missing.join(', ')}`);
+            await setStatus('failure',
+              `No disposition given for: ${missing.join(', ')}`);
             return;
           }
 
