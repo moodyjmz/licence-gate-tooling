@@ -29,6 +29,27 @@ from the last pusher, and logs them. We were rebuilding that, badly.
 The gate is then left with one mechanical question: **for every candidate, is there a
 register row in this diff?**
 
+## Where the rationale lives
+
+The rationale is the field that carries the judgement, so it needs saying explicitly.
+
+It is a **column in the register row**: written by the author, contested through
+ordinary review. The reviewer never edits it themselves — they request a change and the
+author revises — which keeps `require_last_push_approval` intact.
+
+This is stronger than the comment it replaces, not weaker:
+
+- a rationale in a comment was free text, unvalidated, and impossible to diff later
+- a rationale in the row is versioned, sits where reviewers already look, and stays
+  attached to the record
+- `dismiss_stale_reviews` means **editing the rationale drops the approval**, so a
+  sign-off attaches to specific words. The old design could not do that: a reviewer
+  wrote a rationale in a comment and the author could push anything afterwards
+
+What does not change: *whether a stated rationale is the real one* stays in the
+**not checked** list, permanently. No machine reaches it. The gain is that it is now in
+a diff rather than a comment thread.
+
 ## What goes
 
 | Removed | Replaced by |
