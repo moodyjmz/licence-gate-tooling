@@ -261,6 +261,93 @@ class TestCheckBWithoutADiffParser(GateCase):
         self.assertIn("vendor/dep", report)
 
 
+class TestBinaryIsDecidedTheWayGitDecidesIt(GateCase):
+    """Found by a red-team round. `looks_binary` read the WHOLE blob and called it
+    binary on a single NUL anywhere in it, or on nine U+FFFD characters - which are
+    valid UTF-8 text. git inspects the first 8000 bytes only, so a NUL at offset 40000
+    is text to git and was binary to us, and check_b skipped the file.
+
+    Worse, the skip was one-sided: only the BASE blob was tested. That gave a two-step
+    attack with both steps green. Step one adds a comment full of replacement
+    characters - "Nothing to do". Step two deletes the upstream licence header and
+    removes the fixture; check_b reads the base as binary, skips it, and emits a
+    NON-BLOCKING candidate reading "binary content changed - no line-level check is
+    possible". The head is a text .js file. The check was entirely possible, and the
+    stated reason was the attacker's cover story."""
+
+    def write_bytes(self, path, data):
+        full = os.path.join(self.dir, path)
+        os.makedirs(os.path.dirname(full), exist_ok=True)
+        with open(full, "wb") as fh:
+            fh.write(data)
+
+    def _candidates(self):
+        p = subprocess.run(["python3", GATE, "--candidates", "HEAD~1", "HEAD"],
+                           cwd=self.dir, capture_output=True, text=True)
+        return p.stdout.split()
+
+    def test_a_nul_byte_past_the_first_8000_does_not_make_a_js_file_binary(self):
+        filler = "// filler line to push the NUL out of git's window\n" * 200
+        head_lines = "// Copyright (c) 2020 Example Corp\n// Modified by the Example project.\n"
+        self.write_bytes("src/big.js",
+                         (head_lines + filler).encode() + b"const x = 1;\x00\n")
+        self.commit("base")
+        self.write_bytes("src/big.js",
+                         filler.encode() + b"const x = 2;\x00\n")
+        self.commit("drop the header from the far side of the window")
+
+        # Assert the premise, or this test can pass for the wrong reason.
+        numstat = self._git("diff", "--numstat", "HEAD~1", "HEAD").stdout
+        self.assertNotIn("-\t-", numstat,
+                         f"git must consider this file text, or there is nothing to "
+                         f"prove: {numstat!r}")
+        self.assertGreater(os.path.getsize(os.path.join(self.dir, "src/big.js")), 8000)
+
+        report = self.assertBlocks("git calls this text, so the gate must too")
+        self.assertIn("removed or altered", report)
+        self.assertIn("2020 Example Corp", report)
+
+    def test_a_blob_binary_at_one_end_only_is_checked_not_routed(self):
+        """The two-step attack, second step. Undecodable bytes at the base end are not
+        a licence to skip a text head."""
+        self.write_bytes("src/panel.js",
+                         b"// Copyright (c) 2011 Upstream Foundry\n"
+                         b"// Modified by the Example project.\n"
+                         b"// fixture: " + b"\xff" * 40 + b"\n"
+                         b"const x = 1;\n")
+        self.commit("base")
+        self.write_bytes("src/panel.js", b"const x = 2;\n")
+        self.commit("delete the header and remove the fixture")
+        report = self.assertBlocks("a text head end makes the line check possible")
+        self.assertIn("removed or altered", report)
+        self.assertIn("Upstream Foundry", report)
+        self.assertNotIn("no line-level check is possible", report,
+                         "the gate may not state a reason that is untrue; the check "
+                         "was possible and it ran")
+
+    def test_a_genuine_binary_at_both_ends_still_reaches_a_human(self):
+        """The routing this must not break, pinned on a `.js` so it can only be
+        binary_skips that carries it. An asset extension would reach check_c on its own
+        and prove nothing - which is the hole check_c's docstring already warns about:
+        a binary named .js is skipped by check_b and classified as source by check_c,
+        and vanishes between them unless the skip list is passed along."""
+        self.write_bytes("src/blob.js",
+                         b"\x00\x01\x00\x02Copyright (c) 2011 Example Foundry\xff\xfe")
+        self.commit("base")
+        self.write_bytes("src/blob.js",
+                         b"\x00\x01\x00\x02Copyright (c) 2024 Other Foundry\xff\xfe")
+        self.commit("swap the blob")
+        code, report = self.run_gate()
+        self.assertNotIn("removed or altered", report,
+                         "a binary has no lines anyone can restore")
+        self.assertIn("src/blob.js", self._candidates(),
+                      "a binary skipped by check_b must reach the reviewer, or it "
+                      "vanishes between the two checks")
+        self.assertIn("no line-level check is possible", report,
+                      "true here, and only here: neither end has lines")
+        self.assertEqual(code, 0, report)
+
+
 class TestTheRegisterDoesNotBlockItself(GateCase):
     """The two files this whole programme writes its records into blocked every attempt
     to write a record into them.

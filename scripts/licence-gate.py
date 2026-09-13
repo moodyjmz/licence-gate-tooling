@@ -135,17 +135,35 @@ def both_ends_notice_files(old_path, new_path):
     return bool(ends) and all(NOTICE_FILE_RE.search(p) for p in ends)
 
 
+# git's own window. `git diff` decides whether a blob is binary by looking for a NUL
+# in the first 8000 bytes and nowhere else, so a NUL at offset 40000 is text to git.
+# Scanning the whole blob instead put the gate and git into disagreement about what a
+# file IS, in the direction that stops the gate checking: one NUL appended to the end
+# of an ordinary .js file made it binary to us, text to everyone else, and skipped.
+_BINARY_WINDOW = 8000
+
+
 def looks_binary(text):
-    """Whether this blob is bytes rather than lines.
+    """Whether this blob is bytes rather than lines, decided the way git decides it.
 
     A NUL byte is the test git itself uses, and it is the one that matters: text files
     do not contain them. U+FFFD is counted too because blobs are read with
     errors="replace", so undecodable bytes arrive as replacement characters rather
     than as an exception - a run of those is a binary that decoded quietly.
+
+    Both tests are confined to the leading window, and the window is measured on the
+    decoded text rather than on raw bytes, which is the closest this side of the decode
+    can get to git's rule. A multi-byte character makes the window slightly generous;
+    being generous about how much of the file is inspected is the safe direction.
+
+    THIS PREDICATE DOES NOT DECIDE ANYTHING ON ITS OWN. One end of a change looking
+    binary is not grounds for skipping the line checks - see check_b, where both ends
+    have to look binary before anything is routed away from them.
     """
-    if "\x00" in text:
+    window = text[:_BINARY_WINDOW]
+    if "\x00" in window:
         return True
-    return text.count("\ufffd") > max(8, len(text) // 200)
+    return window.count("\ufffd") > max(8, len(window) // 200)
 
 
 def resolve(rev):
@@ -242,6 +260,21 @@ def check_b(base, head, pairs):
     extension, and a reviewer must disposition it. If that guarantee ever stops
     holding, this becomes a hole. `binary_skips` is returned for exactly that reason -
     the caller feeds it to check_c rather than trusting the two to agree.
+
+    BOTH ENDS, and only both. Testing the base blob alone gave a two-step attack whose
+    every step was green: step one adds a comment full of undecodable bytes to a .js
+    file - "Nothing to do"; step two deletes the upstream licence header and removes
+    the fixture, whereupon check_b read the base as binary, skipped it, and emitted a
+    non-blocking candidate reading "no line-level check is possible". The head was an
+    ordinary text file. The check was entirely possible, the licence line was gone, and
+    the stated reason was the attacker's cover story.
+
+    A path that looks binary at exactly ONE end is a blocking case, not a routed one:
+    something with lines is becoming something without them, or the reverse, and either
+    is a question about licence text that the line comparison can actually answer. It
+    is also the direction that over-reports, which is the direction this tool takes
+    everywhere. Only when neither end has lines is "no line-level check is possible"
+    a true sentence, and the reason string is only emitted where it is true.
     """
     violations, binary_skips, claims, deleted_headers = [], [], [], []
     for old_path, new_path, old_is_link, new_is_link in pairs:
@@ -269,12 +302,6 @@ def check_b(base, head, pairs):
             # raise both for a human.
             continue
         before = read_at(base, old_path, "the base version of")
-        # Decided by CONTENT, not extension. An extension list is what made .otf and
-        # .webp invisible once already, and the question here is whether the blob has
-        # lines at all - which its name cannot answer.
-        if looks_binary(before):
-            binary_skips.append(new_path or old_path)
-            continue
         # A WHOLE-FILE DELETION IS A QUESTION, NOT A VIOLATION. These two cases used to
         # be fused as "no head blob means every line of the base is gone", which is
         # literally true and produced an instruction nobody can follow: `git rm` on a
@@ -304,7 +331,26 @@ def check_b(base, head, pairs):
         # overwrite a licensed file with a submodule pointer - is one a person can
         # actually carry out. Treating it as "no head blob" is how replacing a licensed
         # file with a submodule passed in silence once already.
-        after = "" if new_is_link else read_at(head, new_path, "the modified file")
+        #
+        # Binary is decided by CONTENT, not extension - an extension list is what made
+        # .otf and .webp invisible once already - and it is decided at BOTH ENDS. A blob
+        # that looks binary at one end only still has lines at the other, so the line
+        # comparison can run and does; only a change with no lines at either end is
+        # routed to the reviewer instead.
+        if new_is_link:
+            # No head blob exists to compare against, so "both ends" cannot be asked.
+            # A binary base here is the font-swapped-for-a-submodule case, whose remedy
+            # is not a line anyone can restore; a text base is the licensed-file case,
+            # which blocks.
+            if looks_binary(before):
+                binary_skips.append(new_path)
+                continue
+            after = ""
+        else:
+            after = read_at(head, new_path, "the modified file")
+            if looks_binary(before) and looks_binary(after):
+                binary_skips.append(new_path)
+                continue
         present = set(after.split("\n"))
         # The leading comment region of each end, as the set of its own lines. Taken
         # from licence_map's single definition and split back up rather than walked
