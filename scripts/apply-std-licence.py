@@ -41,15 +41,34 @@ def added_files(base, head):
     return added, gitlinks
 
 
-def has_header(path):
+def read_text(path):
+    """The file's content, or None when it could not be read as text.
+
+    NONE IS NOT "NO HEADER", and it is not "has a header" either - it is "nothing was
+    examined", which is a different answer and now has a different value. Returning
+    True here instead meant an unreadable path arrived at `classify` as a file that
+    already carried a header, and came back refused for that reason. ASSET_RE admits
+    binaries, so an explicitly named new .png - which has no text to read and never
+    will - was refused with a sentence about its contents that nobody had looked at.
+    That is the accident already removed for submodules, where the note reads that the
+    old reason "was said about a path with no content here".
+
+    The refusal is unchanged; only the reason is. Nothing here stamps a binary."""
+    try:
+        with open(path, encoding="utf-8", newline="") as fh:
+            return fh.read()
+    except (OSError, UnicodeDecodeError):
+        return None
+
+
+def has_header(content):
     """Uses the one shared predicate. This was a third, separate implementation - a
     literal search for "SPDX-License-Identifier" in the first 15 lines - which agreed
     with neither of the other two. Three answers to "has this file got a header" is
-    how a file our own tool stamped became invisible to the gate enforcing headers."""
-    try:
-        content = open(path, encoding="utf-8").read()
-    except (OSError, UnicodeDecodeError):
-        return True  # unreadable: treat as "leave alone"
+    how a file our own tool stamped became invisible to the gate enforcing headers.
+
+    A pure predicate over content that was actually read. Deciding whether the file
+    could be read at all is a separate question, asked before this one."""
     return has_licence_header(leading_comment_region(content))
 
 
@@ -112,7 +131,20 @@ def main(argv):
                                   "content and its licence belong to the repository it "
                                   "points at; record it, do not stamp it"))
             continue
-        action, lic, reason = classify(path, path in explicit, has_header(path))
+        # Read BEFORE classify, and refused here rather than there: licence_map is the
+        # pure decision module and does no file IO, so "could not be read" is not a
+        # state it can be told about honestly. A gitlink cannot be read either, which
+        # is why mode is decided first - otherwise this branch would swallow it and
+        # hand back the weaker of two true reasons.
+        content = read_text(path)
+        if content is None:
+            refused.append((path, "could not be read as text - a binary, or not text "
+                                  "in this encoding. Nothing in it was examined, so "
+                                  "nothing is being said about what it already claims; "
+                                  "whether it needs a header, and where one could go, "
+                                  "is a person's call"))
+            continue
+        action, lic, reason = classify(path, path in explicit, has_header(content))
         if action == APPLY:
             write_header(path, lic)
             applied.append((path, lic))

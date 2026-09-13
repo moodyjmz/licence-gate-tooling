@@ -1822,3 +1822,61 @@ class TestStampingAHeaderLeavesTheRestOfTheFileAlone(GateCase):
         after = self._read_bytes("src/new.js")
         self.assertNotIn(b"\r", after)
         self.assertTrue(after.endswith(body))
+
+
+class TestARefusalSaysSomethingTrue(GateCase):
+    """An unreadable file was read as "leave alone", which reached `classify` as "this
+    file already has a header" and came back out as the refusal *already carries a
+    header; not overwriting an existing claim*. Of a newly added PNG that is simply
+    false, and it is the same accident that was fixed for submodules: a true statement
+    about a path with no readable content here is available and was not used.
+
+    The refusal stays a refusal. Nothing in this test asks for a binary to be stamped;
+    it asks for the reason to be one a reviewer can act on."""
+
+    def _stamp(self, *paths):
+        p = subprocess.run(["python3", STD_LICENCE, "HEAD~1", "HEAD", *paths],
+                           cwd=self.dir, capture_output=True, text=True)
+        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+        self.assertNotIn("Traceback", p.stderr)
+        return p.stdout
+
+    def test_a_named_binary_is_refused_for_the_reason_it_is_refused_for(self):
+        self.write("src/a.js", "const a = 1;\n")
+        self.commit("base")
+        png = os.path.join(self.dir, "src/icon.png")
+        with open(png, "wb") as fh:
+            fh.write(b"\x89PNG\r\n\x1a\n\xff\xfe\xfd\xfc")
+        self.commit("add an icon")
+        with open(png, "rb") as fh:
+            before = fh.read()
+        out = self._stamp("src/icon.png")
+        self.assertIn("src/icon.png", out)
+        self.assertNotIn("already carries a header", out,
+                         "nothing was read, so nothing can be said about its contents")
+        self.assertIn("could not be read as text", out)
+        with open(png, "rb") as fh:
+            self.assertEqual(fh.read(), before,
+                             "a refusal must not write into the file it refused")
+
+    def test_a_submodule_is_still_refused_as_a_submodule(self):
+        """A gitlink path cannot be read either, so the unreadable branch would happily
+        swallow it and give back the weaker of two true reasons. Mode is known before
+        anything is opened, and it is decided first."""
+        self.write("src/a.js", "const a = 1;\n")
+        self.commit("base")
+        self._git("update-index", "--add", "--cacheinfo",
+                  f"160000,{'c' * 40},vendor/dep")
+        self._git("commit", "-q", "-m", "vendor a submodule")
+        out = self._stamp("vendor/dep")
+        self.assertIn("submodule", out)
+        self.assertNotIn("could not be read as text", out)
+
+    def test_a_readable_file_that_really_has_a_header_still_says_so(self):
+        """The control: the existing refusal is correct whenever the file was read."""
+        self.write("src/a.js", "const a = 1;\n")
+        self.commit("base")
+        self.write("src/b.js", "// SPDX-License-Identifier: Example-1.0\nconst b = 1;\n")
+        self.commit("add an already-headered file")
+        out = self._stamp("src/b.js")
+        self.assertIn("already carries a header", out)
