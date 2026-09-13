@@ -40,6 +40,61 @@ inputs:
 runs:
   using: composite
   steps:
+    # WHY THE INPUTS ARE VERIFIED AGAINST THE EVENT
+    #
+    # The note above says the gate must not be editable by the thing it is gating,
+    # and then took the commits it compares from the caller. On a `pull_request`
+    # event the workflow file that runs is the pull request's own copy of it, so the
+    # pull request chose those commits. Passing `head.sha` as `base-sha` makes the
+    # diff `head..head`, which is empty: no findings, exit zero, required check green.
+    # No permissions needed, and the edit itself is invisible because `.github/` is
+    # ignored by the gate.
+    #
+    # The event payload is written by GitHub and cannot be set by the branch, so it
+    # is the only trustworthy statement of what this pull request actually is. The
+    # inputs stay - a consumer passing the wrong thing should be told, not silently
+    # overridden - but they are now checked rather than believed.
+    #
+    # Refusing any other event is deliberate. There is no payload to check against,
+    # so an unrecognised trigger is an unverifiable one, and unverifiable fails.
+    - name: Verify the inputs against the event
+      shell: bash
+      env:
+        EVENT_NAME: ${{ github.event_name }}
+        INPUT_BASE: ${{ inputs.base-sha }}
+        INPUT_HEAD: ${{ inputs.head-sha }}
+        INPUT_AUTHOR: ${{ inputs.author }}
+        EVENT_BASE: ${{ github.event.pull_request.base.sha }}
+        EVENT_HEAD: ${{ github.event.pull_request.head.sha }}
+        EVENT_AUTHOR: ${{ github.event.pull_request.user.login }}
+      run: |
+        set -euo pipefail
+
+        fail() {
+          echo "::error title=Licence gate refused to run::$1"
+          echo "The gate compares two commits. It will not accept them from a file"
+          echo "the pull request can edit. Fix the caller workflow, or if you did not"
+          echo "write it, report this - it is what a bypass attempt looks like."
+          exit 1
+        }
+
+        case "$EVENT_NAME" in
+          pull_request|pull_request_target) ;;
+          *) fail "event '$EVENT_NAME' carries no pull request to verify against; this action runs on pull_request only" ;;
+        esac
+
+        [ -n "$EVENT_BASE" ] || fail "the event payload has no base commit"
+        [ -n "$EVENT_HEAD" ] || fail "the event payload has no head commit"
+
+        [ "$INPUT_BASE" = "$EVENT_BASE" ] || fail "base-sha is '$INPUT_BASE'; the event says '$EVENT_BASE'"
+        [ "$INPUT_HEAD" = "$EVENT_HEAD" ] || fail "head-sha is '$INPUT_HEAD'; the event says '$EVENT_HEAD'"
+
+        # The author only decides whose name the report prints as barred from signing
+        # off. Wrong, it points the reader at the wrong person, so it is checked too.
+        if [ -n "$INPUT_AUTHOR" ] && [ "$INPUT_AUTHOR" != "$EVENT_AUTHOR" ]; then
+          fail "author is '$INPUT_AUTHOR'; the event says '$EVENT_AUTHOR'"
+        fi
+
     - name: Run the gate
       id: gate
       shell: bash
