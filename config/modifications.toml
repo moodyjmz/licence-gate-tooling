@@ -1,0 +1,26 @@
+# Where a fork starts, keyed by the repository the notice describes.
+#
+# This file lives in the TOOLING repository and not in the repository being
+# described, deliberately. The baseline defines what "modified" means, so a pull
+# request able to edit it could move its own fork point and drop every entry before
+# it in the same change - and the notice would still look generated.
+#
+# Read by scripts/modifications.py, which parses a deliberately small subset: tables,
+# double-quoted strings, single-line arrays of them, and `#` comments. Anything else
+# is an error rather than a line quietly ignored.
+#
+#   upstream          display name of the upstream project
+#   baseline          the commit the fork starts from
+#   baseline_date     ISO date of that commit
+#   upstream_authors  fnmatch patterns - matched against the author's name and
+#                     address, case-insensitively - whose commits are upstream's work
+#                     and not ours. A pattern with no wildcard is an exact match.
+#                     An author matching nothing here counts as OURS: a spurious
+#                     entry is noise, a missing one is a gap nobody can see.
+#                     The key is required even when the list is empty.
+
+["moodyjmz/licence-gate-target"]
+upstream = "Example Upstream"
+baseline = "8906cdd6016c416ebaf5bd8b778dff6709cb5aad"
+baseline_date = "2026-09-11"
+upstream_authors = []
