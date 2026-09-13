@@ -301,6 +301,19 @@ def subject_for(subject, body, sha, warn):
     return subject
 
 
+def notice_path():
+    """Where the notice belongs: the repository root, not wherever we are standing.
+
+    `--check` reads the committed blob, and a blob path is always relative to the
+    root. A bare `open(FILENAME, "w")` is relative to the process, so running --write
+    from a subdirectory would write a SECOND notice that the check can never see -
+    and the gate's own pattern is anchored to any path component, so it would start
+    enforcing append-only on the stray one too.
+    """
+    return os.path.join(sh_strict("git", "rev-parse", "--show-toplevel").strip(),
+                        FILENAME)
+
+
 def touches_only_the_notice(sha):
     """Is this commit nothing but the notice being brought up to date?
 
@@ -500,7 +513,7 @@ def main(argv=None):
         cfg, baseline_sha, entries = generate(repo, args.config, "HEAD", warn)
         text = render(cfg, baseline_sha, entries)
         if args.write:
-            with open(FILENAME, "w", encoding="utf-8") as fh:
+            with open(notice_path(), "w", encoding="utf-8") as fh:
                 fh.write(text)
             print(f"wrote {FILENAME}: {len(entries)} entr"
                   f"{'y' if len(entries) == 1 else 'ies'}.")

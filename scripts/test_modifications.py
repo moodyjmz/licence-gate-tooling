@@ -298,6 +298,19 @@ class TestTheFileShape(RepoCase):
         self.assertIn("MODIFICATIONS.md", self._git("status", "--porcelain").stdout,
                       "--write leaves the change uncommitted; it does not commit or push")
 
+    def test_write_puts_the_notice_at_the_repository_root(self):
+        """A blob path is relative to the root, so a notice written relative to the
+        process is one `--check` can never see - and the gate would enforce
+        append-only on it anyway, its pattern matching any path component."""
+        self.write("src/a.js", "x\n")
+        self.commit("feat: first")
+        sub = os.path.join(self.dir, "src")
+        p = subprocess.run(["python3", GEN, "--repo", REPO, "--config", self.config,
+                            "--write"], cwd=sub, capture_output=True, text=True)
+        self.assertEqual(p.returncode, 0, p.stderr)
+        self.assertTrue(os.path.exists(os.path.join(self.dir, "MODIFICATIONS.md")))
+        self.assertFalse(os.path.exists(os.path.join(sub, "MODIFICATIONS.md")))
+
     def test_a_fork_with_no_modifications_yet_is_a_notice_with_no_entries(self):
         """Zero entries is a legitimate answer - and it is reached only after the
         baseline resolved, was an ancestor, and the log was read successfully."""
