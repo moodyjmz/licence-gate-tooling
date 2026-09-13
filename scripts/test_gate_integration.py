@@ -155,8 +155,14 @@ class TestCheckBWithoutADiffParser(GateCase):
 
     def test_a_reordered_header_line_is_not_a_false_positive(self):
         """The stated cost of dropping positional diffing, pinned so it is a decision
-        rather than a surprise: a header line that merely MOVES is still present in the
-        head blob, so it no longer reports. The line is there, byte for byte."""
+        rather than a surprise: a header line that merely moves WITHIN the leading
+        comment region is still in the region, so it does not report. Relative order
+        inside a header is not claimed to carry meaning.
+
+        Narrower than it used to be. "Still present in the head blob, byte for byte"
+        was the whole rule once, and a line moved out of the region entirely - into a
+        string literal at the bottom of the file - passed under it. See
+        TestHeaderProminenceNotJustPresence."""
         self.write("src/a.js", "/*\n * Copyright (c) 2020 Example Corp\n"
                                " * Licensed under the Example License 1.0\n"
                                " * Modified by the Example project.\n */\nconst x = 1;\n")
@@ -251,6 +257,74 @@ class TestCheckBWithoutADiffParser(GateCase):
         report = self.assertClean("a submodule bump prompts a human; it does not error")
         self.assertNotIn("could not run", report)
         self.assertIn("vendor/dep", report)
+
+
+class TestHeaderProminenceNotJustPresence(GateCase):
+    """Found by a red-team round. check_b asked "does this line still appear ANYWHERE
+    in the head blob", which is membership over the whole file, and its docstring
+    called the resulting gap bounded because "the line is still literally present".
+
+    It is not bounded. AGPL 5(a) requires a PROMINENT notice, and prominence is
+    positional: a copyright line moved out of the leading comment block and into a
+    template string at the bottom of the file is byte-identical and legally gone. The
+    gate said "Nothing to do - both checks pass" and certified that no licence or
+    copyright line had been deleted or altered."""
+
+    OURS = (" * Copyright (c) 2020 Example Corp\n"
+            " * Licensed under the Example License 1.0\n"
+            " * Modified by the Example project.\n")
+    UPSTREAM = " * Copyright (c) 2011 Upstream Foundry\n"
+
+    def test_a_header_line_moved_out_of_the_comment_block_is_a_removal(self):
+        self.write("src/panel.js",
+                   "/*\n" + self.UPSTREAM + self.OURS + " */\n"
+                   "const x = 1;\n")
+        self.commit("base")
+        # Byte-identical, still in the file, no longer in the header.
+        self.write("src/panel.js",
+                   "/*\n" + self.OURS + " */\n"
+                   "const x = 1;\n"
+                   "const BANNER = `\n" + self.UPSTREAM + "`;\n")
+        self.commit("move the upstream line into a template string")
+        report = self.assertBlocks("attribution moved out of the header is destroyed "
+                                   "even though the bytes survive")
+        self.assertIn("removed or altered", report)
+        self.assertIn("Upstream Foundry", report,
+                      "name the line, or the reviewer cannot judge it")
+        self.assertNotIn("no licence or copyright line deleted", report,
+                         "the verified box must not certify what was not checked")
+
+    def test_a_header_line_moved_into_the_comment_block_is_not_a_removal(self):
+        """The reverse direction, guarding against over-reach. A line that gains
+        prominence has lost none, and reporting it would be a removal finding nobody
+        can act on."""
+        self.write("src/panel.js",
+                   "/*\n" + self.OURS + " */\n"
+                   "const x = 1;\n"
+                   "/*\n" + self.UPSTREAM + " */\n")
+        self.commit("base")
+        self.write("src/panel.js",
+                   "/*\n" + self.UPSTREAM + self.OURS + " */\n"
+                   "const x = 2;\n")
+        self.commit("promote the upstream line into the header")
+        report = self.assertClean("a line moving INTO the header has lost no prominence")
+        self.assertNotIn("removed or altered", report)
+
+    def test_an_unrelated_edit_inside_the_comment_block_is_not_a_removal(self):
+        """Editing a non-header line inside the region must not drag the header lines
+        around it into the finding. Removal FROM the region is the finding; the region
+        changing is not."""
+        self.write("src/panel.js",
+                   "/*\n * Part of the Example project.\n" + self.OURS + " */\n"
+                   "const x = 1;\n")
+        self.commit("base")
+        self.write("src/panel.js",
+                   "/*\n * Part of the Example project, second edition.\n"
+                   + self.OURS + " */\n"
+                   "const x = 2;\n")
+        self.commit("edit an ordinary comment line in the header block")
+        report = self.assertClean("an ordinary comment edit is not a licence removal")
+        self.assertNotIn("removed or altered", report)
 
 
 class TestPathsGitQuotes(GateCase):

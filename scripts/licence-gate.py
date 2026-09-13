@@ -154,17 +154,39 @@ def check_b(base, head, pairs):
 
     Both were bugs in a hand-rolled state machine over a format whose escaping is not
     ours to control. The question this check actually answers does not need that
-    format at all: does every header-shaped line in the base blob still appear in the
-    head blob? Both blobs are one `git show` away, and neither has any syntax layered
-    on top of it. A parser that does not exist has no parsing bugs.
+    format at all, and it is asked TWICE over the same two blobs:
 
-    THE TRADE-OFF, stated because it is a real loss: line-set membership is coarser
-    than positional diffing. A header line that is merely REFLOWED - moved up or down,
-    or duplicated - stops being reported, because the text still appears somewhere.
-    And a line whose whitespace changed reads as "deleted" rather than "changed",
-    since membership is on exact text. The second is a false positive and the first is
-    a narrowing; the narrowing is bounded (the line is still literally present in the
-    file, byte for byte) while the over-report is the direction this tool has chosen
+      * does every header-shaped line in the base blob still appear somewhere in the
+        head blob?
+      * does every header-shaped line that was in the base blob's LEADING COMMENT
+        REGION still appear in the head blob's leading comment region?
+
+    Both blobs are one `git show` away, and neither has any syntax layered on top of
+    it. A parser that does not exist has no parsing bugs.
+
+    THE SECOND QUESTION EXISTS BECAUSE PROMINENCE IS POSITIONAL. Membership over the
+    whole blob was once described here as a bounded narrowing - "the line is still
+    literally present in the file, byte for byte" - and that rationale was wrong. Take
+    a file carrying an upstream copyright line and a first-party one, move the upstream
+    line out of the leading comment block into a template string at the bottom of the
+    file, byte-identical, and the gate answered "Nothing to do - both checks pass"
+    while certifying that no copyright line had been deleted or altered. AGPL 5(a)
+    requires a PROMINENT notice; an attribution demoted to program data is destroyed
+    however many of its bytes survive. A set over the whole file cannot express that,
+    so the region is asked about separately.
+
+    The region is `licence_map.leading_comment_region` - the same definition check_a
+    and apply_fix use, imported, not re-derived. Three disagreeing definitions of "the
+    header region" is how a file became invisible to every check once already.
+
+    REMOVAL FROM THE REGION IS THE FINDING, and only that. A line moving INTO the
+    region has lost no prominence and is not reported; reordering WITHIN the region
+    changes no membership and is not reported either (whether relative order inside a
+    header carries meaning is a separate question, deliberately not answered here).
+
+    THE REMAINING TRADE-OFF, stated because it is a real one: a line whose whitespace
+    changed reads as "deleted" rather than "changed", since membership is on exact
+    text. That is a false positive, which is the direction this tool has chosen
     everywhere else. Comparison is exact, NOT stripped: stripping would make a
     whitespace-altered line read as unchanged, which is narrowing detection to make
     something pass.
@@ -223,8 +245,19 @@ def check_b(base, head, pairs):
         after = ("" if new_path is None or new_is_link
                  else read_at(head, new_path, "the modified file"))
         present = set(after.split("\n"))
+        # The leading comment region of each end, as the set of its own lines. Taken
+        # from licence_map's single definition and split back up rather than walked
+        # here: a second walk is a second definition, whatever it is called.
+        was_prominent = set(leading_comment_region(before).split("\n"))
+        is_prominent = set(leading_comment_region(after).split("\n"))
+        reported = set()
         for line in before.split("\n"):
-            if has_licence_header(line) and line not in present:
+            if not has_licence_header(line) or line in reported:
+                continue
+            gone_entirely = line not in present
+            demoted = line in was_prominent and line not in is_prominent
+            if gone_entirely or demoted:
+                reported.add(line)
                 violations.append((old_path, line.strip()))
 
         # AND THE OTHER DIRECTION. This check only ever examined removals, so ADDING an
