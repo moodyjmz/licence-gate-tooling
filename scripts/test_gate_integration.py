@@ -1616,3 +1616,76 @@ class TestTheRegisterIsAppendOnly(GateCase):
         self.commit("start the register")
         report = self.assertClean("creating the register must not block")
         self.assertNotIn("append-only", report)
+
+
+class TestANewFileWearingSomeoneElsesHeader(GateCase):
+    """The attack that beat this gate twice in live red-team rounds, and the reason a
+    header is not an answer.
+
+    A new source file carrying a header used to reach no list at all: not an asset, so
+    not asked for provenance; source with a header, so not asked for one either. A file
+    imported from a third-party project with its original header intact - the commonest
+    way vendored code arrives - reported "Nothing to do".
+
+    The discriminator is the HOLDER. A header naming us is a claim the author made in
+    the open. A header naming somebody else is content that arrived from somewhere,
+    which is exactly what the register exists to record."""
+
+    THIRD_PARTY = ("/*\n * Copyright (C) 2019 Someone Else Ltd\n"
+                   " * SPDX-License-Identifier: MIT\n */\n")
+    OURS = ("/*\n * SPDX-FileCopyrightText: 2026 Example project contributors\n"
+            " * SPDX-License-Identifier: Example-1.0\n */\n")
+
+    def _candidates(self):
+        p = subprocess.run(["python3", GATE, "--candidates", "HEAD~1", "HEAD"],
+                           cwd=self.dir, capture_output=True, text=True)
+        self.assertEqual(p.returncode, 0, p.stderr)
+        return p.stdout.split()
+
+    def test_a_new_file_with_a_third_party_header_asks_a_human(self):
+        self.write("src/keep.js", "const y = 1;\n")
+        self.commit("base")
+        self.write("src/imported.js", self.THIRD_PARTY + "const x = 1;\n")
+        self.commit("import")
+        code, report = self.run_gate()
+        self.assertIn("src/imported.js", self._candidates(),
+                      "a file arriving under someone else's copyright is the single "
+                      "most interesting thing the register can record")
+        self.assertIn("names someone other than us", report)
+
+    def test_a_new_file_with_our_own_header_raises_nothing(self):
+        self.write("src/keep.js", "const y = 1;\n")
+        self.commit("base")
+        self.write("src/mine.js", self.OURS + "const x = 1;\n")
+        self.commit("add ours")
+        code, report = self.run_gate()
+        self.assertNotIn("src/mine.js", self._candidates(),
+                         "prompting on every first-party file is how a gate becomes "
+                         "something people click past")
+        self.assertNotIn("names someone other than us", report)
+
+    def test_a_new_file_with_no_header_still_blocks(self):
+        self.write("src/keep.js", "const y = 1;\n")
+        self.commit("base")
+        self.write("src/bare.js", "const x = 1;\n")
+        self.commit("add bare")
+        code, report = self.run_gate()
+        self.assertEqual(code, 1, "a headerless new source file must still block")
+        self.assertIn("src/bare.js", report)
+
+    def test_the_report_and_the_acknowledgement_gate_see_the_same_candidates(self):
+        """The report builds its candidate list in one call and `--candidates` in
+        another. Adding this source to the first and not the second made the report say
+        "1 candidate" while the gate that enforces them demanded none, and the pull
+        request went green. Two enumerators of one thing is the defect; this test is the
+        tripwire until they are one function."""
+        self.write("src/keep.js", "const y = 1;\n")
+        self.commit("base")
+        self.write("src/imported.js", self.THIRD_PARTY + "const x = 1;\n")
+        self.write("assets/tile.svg", "<svg/>\n")
+        self.commit("import and add an asset")
+        code, report = self.run_gate()
+        for path in self._candidates():
+            self.assertIn(path, report,
+                          f"{path} is demanded by the acknowledgement gate but the "
+                          f"report never names it, so nobody can answer it")

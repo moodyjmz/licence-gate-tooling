@@ -24,7 +24,7 @@ import re
 import sys
 
 from git_io import GateError, changed_files, git_show, merge_base, sh_strict
-from licence_map import (SOURCE_RE, declaration_kind, has_licence_header,
+from licence_map import (COPYRIGHT, SOURCE_RE, declaration_kind, has_licence_header,
                          leading_comment_lines, leading_comment_region,
                          licence_declaration)
 
@@ -576,29 +576,28 @@ def check_d(head, added, gitlinks=()):
     source file and the other fell through every branch. Neither is a file at all, and
     the name never had anything to say about it.
 
-    KNOWN HOLE, NOT FIXED HERE, AND WIDENED BY THE SOURCE_RE EXTENSION. A new source
-    file that ALREADY carries a header produces nothing at all: it is not
-    `needs_provenance`, so it takes the SOURCE_RE branch, has a header, and is appended
+    A HEADER IS NOT AN ANSWER, AND WHOSE HEADER IT IS decides which question to ask.
+    A new source file that already carries a header used to produce nothing at all: not
+    `needs_provenance`, so it took the SOURCE_RE branch, had a header, and was appended
     to no list. A third-party file added with upstream's own header intact - the
-    commonest way vendored code arrives - is therefore invisible to check_d, and
-    check_c's added-loop skips it too.
+    commonest way vendored code arrives - was invisible here and to check_c's
+    added-loop. That is how a file whose own body said it was copied from a third-party
+    project passed with "Nothing to do", twice, in a live red-team round.
 
-    That hole pre-existed for `.js`, `.py`, `.c` and the rest of the original list.
-    Widening SOURCE_EXTENSIONS moved `.php`, `.vue`, `.scss`, `.xml` and the others
-    INTO it: before, they fell to the asset branch and raised "asset added. Where did
-    it come from?", and now they do not. Measured, not assumed - a headered
-    `src/vendored.php` raised a candidate before the widening and reports "Nothing to
-    do" after it.
+    The discriminator is the holder, not the presence of a header. A header naming us
+    is a claim the author made and the diff shows; a header naming somebody else is
+    content that arrived from somewhere, which is the single most interesting thing a
+    register can record. So the first raises nothing and the second raises a candidate.
 
-    Deliberately left, because the obvious fix is worse: routing every headered new
-    source file to provenance fires on every first-party file anyone adds, and a gate
-    that prompts on ordinary work is a gate people learn to click past. Closing it
-    properly means asking whether the header is OURS - comparing the new file's header
-    against licence_map.header_texts for the licence its path maps to - which is a
-    different check with its own false-positive profile and belongs in its own commit
-    with its own corpus.
+    Asking about EVERY headered new file was the alternative, and it is worse: it fires
+    on every first-party file anyone adds, and a gate that prompts on ordinary work is
+    one people learn to click past. Keying on the holder fires rarely and on the right
+    files.
+
+    What this does NOT close, and cannot: a third-party file added carrying OUR header.
+    The claim is false and the diff cannot tell. That is the permanent human part.
     """
-    needing, assets, links = [], [], []
+    needing, assets, links, foreign = [], [], [], []
     for p in added:
         if p in gitlinks:
             links.append(p)
@@ -606,9 +605,15 @@ def check_d(head, added, gitlinks=()):
             assets.append(p)
         elif SOURCE_RE.search(p):
             content = read_at(head, p, "the new file")
-            if not has_licence_header(leading_comment_region(content)):
+            region = leading_comment_region(content)
+            if not has_licence_header(region):
                 needing.append(p)
-    return needing, assets, links
+            elif COPYRIGHT not in region:
+                foreign.append((
+                    p, "new file arriving with a licence header that does not name "
+                       "us - whose code is it, under which licence, and does it need "
+                       "recording?"))
+    return needing, assets, links, foreign
 
 
 # `.gitattributes` at ANY depth: git reads one per directory, so a nested file governs
@@ -1026,9 +1031,15 @@ def main(argv, author=None):
 
     if candidates_only:
         _, binary_skips, claims, _deleted_headers = check_b(base, head, pairs)
+        # The foreign-header additions belong here too. They were added to the report's
+        # call and not to this one, and the split showed up immediately: the report said
+        # "1 candidate" while the acknowledgement gate, which reads THIS list, demanded
+        # nothing and went green. Two enumerators of the same thing is the defect; until
+        # they are one function, every candidate source goes in both.
+        _, _, _, foreign = check_d(head, added, gitlinks)
         for p, _ in check_c(added, modified, deleted, renamed, gitlinks,
                             binary_skips, claims,
-                            declarations=check_e(base, head, pairs),
+                            declarations=list(check_e(base, head, pairs)) + list(foreign),
                             attributes=check_f(base, head, pairs)):
             print(p)
         return 0
@@ -1046,10 +1057,12 @@ def main(argv, author=None):
 
     b, binary_skips, claims, deleted_headers = check_b(base, head, pairs)
     a = check_a(base, head, modified_for_a, base_paths, gitlinks)
+    # check_d first: the foreign-header additions it finds are candidates, so it feeds
+    # check_c rather than merely reporting alongside it.
+    d_src, d_assets, d_links, d_foreign = check_d(head, added, gitlinks)
     c = check_c(added, modified, deleted, renamed, gitlinks, binary_skips, claims,
-                declarations=check_e(base, head, pairs),
+                declarations=list(check_e(base, head, pairs)) + list(d_foreign),
                 attributes=check_f(base, head, pairs))
-    d_src, d_assets, d_links = check_d(head, added, gitlinks)
     g = check_g(base, head, pairs)
 
     out = []
@@ -1161,7 +1174,7 @@ def main(argv, author=None):
             out.append(f"- `{p}`")
         out.append("")
 
-    if d_src or d_assets or d_links:
+    if d_src or d_assets or d_links or d_foreign:
         out.append("### New files — worth a look, does not block\n")
         out.append("**Not auto-fixed, deliberately.** A modified file always needs the same "
                    "notice, so a machine can add it. A new file needs a copyright holder, "
@@ -1172,6 +1185,10 @@ def main(argv, author=None):
             out.append(f"- `{p}` — no licence header. Who wrote this, and which licence applies in this directory?")
         for p in d_assets:
             out.append(f"- `{p}` — asset added. Where did it come from? Check it is not a third-party icon set before claiming copyright.")
+        for p, _ in d_foreign:
+            out.append(f"- `{p}` — new file, and its header names someone other than us. "
+                       f"It is in the candidate list below: a reviewer must say whose "
+                       f"code this is and whether it needs recording.")
         for p in d_links:
             out.append(f"- `{p}` — submodule added. Its content is in another repository "
                        f"and is not in this diff: what is it, who wrote it, and under "
