@@ -15,7 +15,7 @@ description: >-
 
 inputs:
   token:
-    description: Token with write access to the pull request branch.
+    description: Token that can read the repository and comment on the pull request.
     required: true
 
 runs:
@@ -66,8 +66,8 @@ runs:
           // fetch whatever is at its tip when this step runs, seconds later - so an
           // author can push new content between the reviewer's comment and the
           // checkout, and have it stamped under a judgement made about something
-          // else. Pin to the commit; the push at the end is then a fast-forward only
-          // if the branch has not moved, and git refuses it if it has.
+          // else. Pin to the commit; the patch that gets posted is then a patch
+          // against the tree the commenter actually asked about.
           core.setOutput('head_sha', pr.data.head.sha);
           if (pr.data.head.repo.full_name !== `${owner}/${repo}`) {
             core.setFailed('Fork pull requests cannot be written to by this action.');
@@ -114,51 +114,109 @@ runs:
         echo "count=$(wc -l < /tmp/fixed.txt | tr -d ' ')" >> "$GITHUB_OUTPUT"
         echo "unfixable=$(wc -l < /tmp/unfixable.txt | tr -d ' ')" >> "$GITHUB_OUTPUT"
 
-    - name: Commit and push
-      if: steps.auth.outputs.ok == 'true' && steps.fix.outputs.count != '0'
+    # NOTHING IS PUSHED. The patch is posted for the author to apply.
+    #
+    # This action used to commit the fix and push it to the pull request branch as
+    # github-actions[bot]. Branch protection's require_last_push_approval exists so
+    # that whoever pushed last cannot also approve; a bot push in between gives that
+    # away. Someone with write access pushes a commit to another person's pull
+    # request, comments /auto-fix, and the bot's push makes the bot the last pusher -
+    # so that person may now approve their own commit, and the compliance record
+    # reads "approved by them at that sha", which is true and worth nothing. The same
+    # push moves the head, so under dismiss_stale_reviews it destroys the approvals
+    # this tooling has just finished collecting.
+    #
+    # The author applying the patch is an ordinary push by an ordinary contributor,
+    # and every protection rule then judges it as designed.
+    - name: Build the patch comment
+      if: steps.auth.outputs.ok == 'true'
       shell: bash
       env:
-        TRIGGERED_BY: ${{ github.event.comment.user.login }}
-        REF: ${{ steps.auth.outputs.ref }}
+        COUNT: ${{ steps.fix.outputs.count }}
+        UNFIXABLE: ${{ steps.fix.outputs.unfixable }}
       run: |
-        git config user.name "github-actions[bot]"
-        git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-        git add -A
-        {
-          echo "chore(license): add modification notices"
-          echo
-          echo "Applied mechanically on request. Each notice is appended to an"
-          echo "existing header block; no existing licence text, copyright line"
-          echo "or SPDX tag is altered."
-          echo
-          echo "Requested-by: ${TRIGGERED_BY}"
-        } > /tmp/commit-msg.txt
-        git commit -s -F /tmp/commit-msg.txt
-        git push origin "HEAD:${REF}"
+        set -euo pipefail
+        tmp="${RUNNER_TEMP:-/tmp}"
+        body="${tmp}/comment-body.md"
+        patch="${tmp}/auto-fix.patch"
+        git diff > "$patch"
+        files="$(git diff --name-only)"
+        # A count and a diff must agree. "Fixed one file" over an unchanged tree is a
+        # contradiction, not "nothing to do", and the two must never share a path out.
+        if [ "${COUNT}" = "0" ] && [ -s "$patch" ]; then
+          echo "The fix reported no files, yet the tree changed. Refusing to describe" >&2
+          echo "a working tree this step cannot account for." >&2
+          exit 1
+        fi
+        if [ "${COUNT}" != "0" ] && [ ! -s "$patch" ]; then
+          echo "The fix reported ${COUNT} file(s) but produced no diff." >&2
+          exit 1
+        fi
+        if [ "${COUNT}" = "0" ]; then
+          echo "Nothing to auto-fix — no modified file is missing its notice." > "$body"
+        else
+          {
+            echo "**Nothing has been pushed. This is a patch for you to apply yourself.**"
+            echo
+            echo "The modification notice is missing from ${COUNT} file(s):"
+            echo
+            printf '%s\n' "$files" | sed 's|^|- `|; s|$|`|'
+            echo
+          } > "$body"
+          # A comment body is capped at 65536 characters. A patch cut off at the cap
+          # still applies cleanly up to the cut, so the author lands a partial fix
+          # that looks complete. Say it is too large instead.
+          if [ "$(wc -c < "$patch")" -gt 60000 ]; then
+            {
+              echo "The patch is too large to post here. Add the notice to the files"
+              echo "listed above by hand, or re-run the fix locally; the gate clears"
+              echo "once the notice is there."
+            } >> "$body"
+          else
+            {
+              echo "Save the block below as \`auto-fix.patch\`, then run"
+              echo "\`git apply auto-fix.patch\`, commit, and push to this branch."
+              echo
+              echo '```diff'
+              cat "$patch"
+              echo '```'
+            } >> "$body"
+          fi
+          {
+            echo
+            echo "Nothing existing was altered: each notice is appended to a header"
+            echo "block that is already there. New files and altered licence lines are"
+            echo "**not** auto-fixed; those need a person."
+            echo
+            echo "This workflow does not push. A push from it would make the bot the"
+            echo "last pusher on your branch, which lets whoever pushed here last"
+            echo "approve their own commit, and moving the head dismisses reviews you"
+            echo "have already been given. Applying it yourself keeps both intact."
+          } >> "$body"
+        fi
+        if [ -n "${UNFIXABLE:-}" ] && [ "${UNFIXABLE}" != "0" ]; then
+          {
+            echo
+            echo "**${UNFIXABLE} file(s) could not be fixed automatically** — see the"
+            echo "run log. Add the notice by hand; the gate will clear once it is there."
+          } >> "$body"
+        fi
 
     - name: Report
       if: steps.auth.outputs.ok == 'true'
       uses: actions/github-script@v7
-      env:
-        COUNT: ${{ steps.fix.outputs.count }}
-        UNFIXABLE: ${{ steps.fix.outputs.unfixable }}
       with:
         github-token: ${{ inputs.token }}
         script: |
+          const fs = require('fs');
           const {owner, repo} = context.repo;
-          const n = process.env.COUNT;
-          if (!n) {
-            // The fix step did not report a count, so it did not complete. Claiming
-            // anything was applied here would be a false statement about the tree.
-            core.setFailed('auto-fix did not complete; nothing was applied');
+          const path = `${process.env.RUNNER_TEMP || '/tmp'}/comment-body.md`;
+          if (!fs.existsSync(path)) {
+            // No body means the previous step did not complete. Saying anything about
+            // the tree here would be a statement nothing has earned.
+            core.setFailed('auto-fix did not complete; no patch was produced');
             return;
           }
-          const stuck = Number(process.env.UNFIXABLE || '0');
-          let body = n === '0'
-            ? 'Nothing to auto-fix — no modified file is missing its notice.'
-            : `Applied the modification notice to ${n} file(s). Nothing existing was altered.\n\nNew files and altered licence lines are **not** auto-fixed; those need a human.`;
-          if (stuck) {
-            body += `\n\n**${stuck} file(s) could not be fixed automatically** — see the run log. Add the notice by hand; the gate will clear once it is there.`;
-          }
-          await github.rest.issues.createComment(
-            {owner, repo, issue_number: context.issue.number, body});
+          await github.rest.issues.createComment({owner, repo,
+            issue_number: context.issue.number,
+            body: fs.readFileSync(path, 'utf8')});

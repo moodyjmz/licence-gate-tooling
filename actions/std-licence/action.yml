@@ -12,7 +12,7 @@ description: >-
 
 inputs:
   token:
-    description: Token with write access to the pull request branch.
+    description: Token that can read the repository and comment on the pull request.
     required: true
 
 runs:
@@ -65,8 +65,8 @@ runs:
           // fetch whatever is at its tip when this step runs, seconds later - so an
           // author can push new content between the reviewer's comment and the
           // checkout, and have it stamped under a judgement made about something
-          // else. Pin to the commit; the push at the end is then a fast-forward only
-          // if the branch has not moved, and git refuses it if it has.
+          // else. Pin to the commit; the patch that gets posted is then a patch
+          // against the tree the assertion was actually made about.
           core.setOutput('head_sha', pr.data.head.sha);
           if (pr.data.head.repo.full_name !== `${owner}/${repo}`) {
             core.setFailed('Fork pull requests cannot be written to by this action.');
@@ -100,34 +100,82 @@ runs:
       env:
         BASE_SHA: ${{ steps.ctx.outputs.base_sha }}
       run: |
+        report="${RUNNER_TEMP:-/tmp}/report.md"
         python3 "${GITHUB_ACTION_PATH}/../../scripts/apply-std-licence.py" \
-          "$BASE_SHA" HEAD > /tmp/report.md
-        cat /tmp/report.md
+          "$BASE_SHA" HEAD > "$report"
+        cat "$report"
 
-    - name: Commit if anything changed
+    # NOTHING IS PUSHED. The headers are posted as a patch for the author to apply.
+    #
+    # This action used to commit and push to the pull request branch as
+    # github-actions[bot], and carried a commit trailer whose only job was to name
+    # the person the bot commit was made on behalf of. Both are gone. A bot push makes the bot the last pusher, which is
+    # exactly what require_last_push_approval is there to prevent: whoever pushed to
+    # the branch a moment earlier may then approve their own commit, and the record
+    # says "approved by them", truthfully and uselessly. The push also moves the
+    # head, dismissing reviews already given.
+    #
+    # The assertion is still recorded and still attributed - in the comment below,
+    # to the person who made it. That was always the part worth keeping; labelling a
+    # bot commit was not.
+    - name: Build the patch comment
       if: steps.ctx.outputs.ok == 'true'
       shell: bash
-      env:
-        ASSERTED_BY: ${{ github.event.comment.user.login }}
-        REF: ${{ steps.ctx.outputs.ref }}
       run: |
-        if [ -z "$(git status --porcelain)" ]; then
-          echo "nothing to commit"; exit 0
+        set -euo pipefail
+        tmp="${RUNNER_TEMP:-/tmp}"
+        body="${tmp}/comment-body.md"
+        patch="${tmp}/std-licence.patch"
+        cp "${tmp}/report.md" "$body"
+        git diff > "$patch"
+        files="$(git diff --name-only)"
+        # The report states what was stamped; the diff is the evidence. A report
+        # claiming headers with no diff behind it is a contradiction, not a quiet
+        # "nothing to do", and the two must never leave by the same exit.
+        if grep -q '^Applied a header to' "$body" && [ ! -s "$patch" ]; then
+          echo "The report claims headers were applied, but the tree is unchanged." >&2
+          exit 1
         fi
-        git config user.name "github-actions[bot]"
-        git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-        git add -A
-        {
-          echo "chore(license): add licence headers to new files"
-          echo
-          echo "Applied on an explicit assertion of authorship. The licence for"
-          echo "each file follows from its path; the copyright line reflects the"
-          echo "assertion below, which a machine cannot make and did not."
-          echo
-          echo "Authorship-asserted-by: ${ASSERTED_BY}"
-        } > /tmp/msg.txt
-        git commit -s -F /tmp/msg.txt
-        git push origin "HEAD:${REF}"
+        if [ -s "$patch" ] && ! grep -q '^Applied a header to' "$body"; then
+          echo "The tree changed, but the report claims nothing was applied." >&2
+          exit 1
+        fi
+        if [ -s "$patch" ]; then
+          {
+            echo
+            echo "**Nothing has been pushed. This is a patch for you to apply yourself.**"
+            echo
+            echo "Files changed:"
+            echo
+            printf '%s\n' "$files" | sed 's|^|- `|; s|$|`|'
+            echo
+          } >> "$body"
+          # A comment body is capped at 65536 characters, and a patch truncated at
+          # the cap still applies cleanly up to the cut - a partial stamping that
+          # looks complete. Say it is too large instead.
+          if [ "$(wc -c < "$patch")" -gt 60000 ]; then
+            {
+              echo "The patch is too large to post here. Add the headers listed in the"
+              echo "report above by hand."
+            } >> "$body"
+          else
+            {
+              echo "Save the block below as \`std-licence.patch\`, then run"
+              echo "\`git apply std-licence.patch\`, commit, and push to this branch."
+              echo
+              echo '```diff'
+              cat "$patch"
+              echo '```'
+            } >> "$body"
+          fi
+          {
+            echo
+            echo "This workflow does not push. A push from it would make the bot the"
+            echo "last pusher on your branch, which lets whoever pushed here last"
+            echo "approve their own commit, and moving the head dismisses reviews you"
+            echo "have already been given. Applying it yourself keeps both intact."
+          } >> "$body"
+        fi
 
     - name: Report
       if: steps.ctx.outputs.ok == 'true'
@@ -138,7 +186,13 @@ runs:
           const fs = require('fs');
           const {owner, repo} = context.repo;
           const who = context.payload.comment.user.login;
-          const body = fs.readFileSync('/tmp/report.md','utf8');
+          const path = `${process.env.RUNNER_TEMP || '/tmp'}/comment-body.md`;
+          if (!fs.existsSync(path)) {
+            // The previous step did not complete. An assertion of authorship recorded
+            // against nothing is worse than no record at all.
+            core.setFailed('std-licence did not complete; nothing was recorded');
+            return;
+          }
           await github.rest.issues.createComment({owner, repo,
             issue_number: context.issue.number,
-            body: `**Authorship asserted by @${who}.**\n\n${body}`});
+            body: `**Authorship asserted by @${who}.**\n\n${fs.readFileSync(path, 'utf8')}`});
