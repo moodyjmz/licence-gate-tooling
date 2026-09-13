@@ -1765,3 +1765,60 @@ class TestWhichReasonACandidateGets(GateCase):
                       "the specific finding leads")
         self.assertIn("(also: asset modified)", reasons[0],
                       "and the generic one survives as context")
+
+
+class TestStampingAHeaderLeavesTheRestOfTheFileAlone(GateCase):
+    """Reading with universal newlines translates every CRLF to LF on the way in and
+    writes LF back out, so adding two header lines to a CRLF file rewrote every line
+    in it. The gate's own fix applier carries `newline=""` at both ends for exactly
+    this reason, with a docstring explaining it; the stamping tool got neither.
+
+    Not cosmetic. A whole-file rewrite buries the two lines a reviewer is being asked
+    to approve under every other line in the file, and the tool that produces it is
+    the one asserting authorship on their behalf.
+    """
+
+    def _stamp(self, *paths):
+        p = subprocess.run(["python3", STD_LICENCE, "HEAD~1", "HEAD", *paths],
+                           cwd=self.dir, capture_output=True, text=True)
+        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+        return p.stdout
+
+    def _write_bytes(self, path, data):
+        full = os.path.join(self.dir, path)
+        os.makedirs(os.path.dirname(full), exist_ok=True)
+        with open(full, "wb") as fh:
+            fh.write(data)
+
+    def _read_bytes(self, path):
+        with open(os.path.join(self.dir, path), "rb") as fh:
+            return fh.read()
+
+    def test_a_crlf_file_keeps_every_line_it_already_had(self):
+        body = b"const a = 1;\r\nconst b = 2;\r\nconst c = 3;\r\n"
+        self._write_bytes("src/base.js", b"const z = 0;\r\n")
+        self.commit("base")
+        self._write_bytes("src/new.js", body)
+        self.commit("add a file with windows line endings")
+        out = self._stamp("src/new.js")
+        self.assertIn("src/new.js", out)
+        after = self._read_bytes("src/new.js")
+        self.assertIn(b"SPDX-License-Identifier", after,
+                      "the header must still be applied")
+        self.assertTrue(after.endswith(body),
+                        "every line that was already there must survive byte for "
+                        "byte; only the header may be new\n"
+                        f"--- file is now ---\n{after!r}")
+
+    def test_an_lf_file_is_not_given_carriage_returns(self):
+        """The other direction of the same rule: nothing may change an ending it was
+        not asked to change."""
+        body = b"const a = 1;\nconst b = 2;\n"
+        self._write_bytes("src/base.js", b"const z = 0;\n")
+        self.commit("base")
+        self._write_bytes("src/new.js", body)
+        self.commit("add a file with unix line endings")
+        self._stamp("src/new.js")
+        after = self._read_bytes("src/new.js")
+        self.assertNotIn(b"\r", after)
+        self.assertTrue(after.endswith(body))

@@ -54,9 +54,26 @@ def has_header(path):
 
 
 def write_header(path, licence):
-    """Pure decision in licence_map.insert_header; this only does the file IO."""
-    content = open(path, encoding="utf-8").read()
-    open(path, "w", encoding="utf-8").write(insert_header(content, path, licence))
+    """Pure decision in licence_map.insert_header; this only does the file IO.
+
+    newline="" AT BOTH ENDS, for the same reason the gate's fix applier carries it.
+    Reading with universal newlines translates every CRLF to LF on the way in and
+    writes LF back out, so stamping two header lines onto a file with Windows line
+    endings rewrote every line in it. The two lines a reviewer is being asked to
+    approve then arrive buried under the whole file, from the tool that is asserting
+    authorship on their behalf.
+
+    WHAT THIS DOES NOT FIX: the header lines themselves are joined with "\\n", so in a
+    CRLF file they land with the wrong ending while everything already there keeps the
+    right one. The join happens in licence_map.insert_header, and the ending-preserving
+    predicate the gate uses lives in the gate. Writing a second copy of that predicate
+    here is the defect this file's own docstring is about, so the remainder is left
+    visible rather than papered over with a duplicate.
+    """
+    with open(path, encoding="utf-8", newline="") as fh:
+        content = fh.read()
+    with open(path, "w", encoding="utf-8", newline="") as fh:
+        fh.write(insert_header(content, path, licence))
 
 
 def main(argv):
