@@ -780,8 +780,8 @@ def main(argv, author=None):
                          "{} licence lines".format(len(b)))))
     if a:
         todo.append(("anyone with write access, the author included",
-                     "add the modification notice to {} — comment `/auto-fix` and it "
-                     "is done for you".format(
+                     "add the modification notice to {} — comment `/auto-fix` for a "
+                     "patch to apply yourself".format(
                          "1 file" if len(a) == 1 else "{} files".format(len(a)))))
     if d_src:
         todo.append(("anyone with write access",
@@ -826,9 +826,12 @@ def main(argv, author=None):
         out.append(f"### Blocking — {len(a)} modified file(s) missing a notice\n")
         out.append(f"Each needs this line appended to its existing header block:\n")
         out.append(f"```\n * {NOTICE}\n```")
-        out.append("**How to resolve:** comment `/auto-fix` on this pull request and it "
-                   "will be applied for you, or add the line by hand. Anyone with write "
-                   "access can trigger it — this is a mechanical fix, not a judgement.\n")
+        out.append("**How to resolve:** comment `/auto-fix` and the bot replies with a "
+                   "patch; save it, `git apply` it, then commit and push. Or add the line "
+                   "by hand. Anyone with write access can ask for the patch — this is a "
+                   "mechanical fix, not a judgement — but you apply it yourself: a bot "
+                   "pushing here would make the bot the last pusher and dismiss any "
+                   "review already given.\n")
         for p in a:
             out.append(f"- `{p}`")
         out.append("")
