@@ -14,8 +14,10 @@ where "posted nothing" and "found nothing" are easiest to confuse, and nothing i
 suite had ever run one.
 """
 
+import json
 import os
 import re
+import shutil
 import subprocess
 import tempfile
 import unittest
@@ -34,6 +36,126 @@ ALLOWED_TMP = (
 )
 # Any other mention of a path under /tmp.
 BARE_TMP = re.compile(r"(?<!-)/tmp/\S+")
+
+
+MARKER = "<!-- licence-gate -->"
+
+NODE = shutil.which("node")
+if NODE is None and os.environ.get("CI") == "true":
+    # Skipping here would delete this file's coverage the day a runner image drops
+    # node, and the suite would still print OK. It is a dependency, so say so.
+    raise RuntimeError("node is required to run the github-script step bodies")
+
+# The harness. `actions/github-script` evaluates the body as an async function with
+# `github`, `context`, `core` and `require` in scope; this builds exactly that, so the
+# text that runs here is the text that runs on the runner.
+#
+# The stubs model the API rather than being convenient. `listComments` answers with a
+# single page of `per_page` entries - 30 when nobody asks, which is the REST default -
+# and a comment body over the 65536-character cap is rejected the way the API rejects
+# it. A stub that returned everything at once would let an unpaginated call pass, and
+# a stub that accepted any length would let an unbounded body pass.
+HARNESS = r"""
+const fs = require('fs');
+const body = fs.readFileSync(process.argv[2], 'utf8');
+const cfg = JSON.parse(fs.readFileSync(process.argv[3], 'utf8'));
+
+const result = {posted: [], updated: [], failed: [], logged: [], summary: '',
+                listed: [], threw: null};
+
+const comments = (cfg.comments || []).map((c, i) => ({id: 1000 + i, body: c}));
+
+const listComments = async (params) => {
+  const per = params.per_page || 30;
+  const page = params.page || 1;
+  result.listed.push({per_page: per, page: page});
+  return {data: comments.slice((page - 1) * per, page * per)};
+};
+
+const cap = (text) => {
+  if (text.length > 65536) {
+    // What the API does: 422, the step throws, and no comment appears at all.
+    const e = new Error('Validation Failed: body is too long (maximum is 65536 characters)');
+    e.status = 422;
+    throw e;
+  }
+};
+
+const github = {
+  paginate: async (fn, params) => {
+    const per = params.per_page || 30;
+    let page = 1, out = [], batch;
+    do {
+      batch = (await fn(Object.assign({}, params, {page: page}))).data;
+      out = out.concat(batch);
+      page += 1;
+    } while (batch.length === per);
+    return out;
+  },
+  rest: {
+    issues: {
+      listComments: listComments,
+      createComment: async (p) => { cap(p.body); result.posted.push(p.body); },
+      updateComment: async (p) => {
+        cap(p.body);
+        result.updated.push({comment_id: p.comment_id, body: p.body});
+      },
+    },
+  },
+};
+
+const summary = {
+  addHeading: (t) => { result.summary += t + '\n'; return summary; },
+  addRaw: (t) => { result.summary += t; return summary; },
+  addCodeBlock: (t) => { result.summary += t; return summary; },
+  addTable: () => summary,
+  addSeparator: () => summary,
+  write: async () => summary,
+};
+
+const core = {
+  setFailed: (m) => { result.failed.push(String(m)); },
+  error: (m) => { result.logged.push(String(m)); },
+  warning: (m) => { result.logged.push(String(m)); },
+  notice: (m) => { result.logged.push(String(m)); },
+  info: (m) => { result.logged.push(String(m)); },
+  debug: () => {},
+  setOutput: () => {},
+  summary: summary,
+};
+
+const context = {
+  repo: {owner: 'an-org', repo: 'a-repo'},
+  issue: {number: 7},
+  runId: 4242,
+  serverUrl: 'https://github.example',
+  payload: {},
+};
+
+const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
+
+(async () => {
+  try {
+    await new AsyncFunction('github', 'context', 'core', 'require', body)(
+      github, context, core, require);
+  } catch (e) {
+    // A throw out of the body is how the step fails on the runner. Recorded
+    // separately from setFailed: a step that chose to fail and a step that fell over
+    // are different outcomes and must not be asserted on interchangeably.
+    result.threw = String((e && e.message) || e);
+  }
+  process.stdout.write(JSON.stringify(result));
+})();
+"""
+
+
+def step_script(action, step_name):
+    """The `script:` body of a named github-script step, as the runner evaluates it."""
+    definition = yaml.safe_load((ACTIONS / action / "action.yml").read_text())
+    for step in definition["runs"]["steps"]:
+        if step.get("name") == step_name:
+            return step["with"]["script"]
+    raise AssertionError(f"{action}: no step named {step_name!r}")
 
 
 def step_run(action, step_name):
@@ -117,6 +239,87 @@ class TestTemporaryFilesAreScopedToTheRun(unittest.TestCase):
         for path in sorted(ACTIONS.glob("*/action.yml")):
             with self.subTest(action=path.parent.name):
                 self.assertIn("steps", yaml.safe_load(path.read_text())["runs"])
+
+
+@unittest.skipUnless(NODE, "node is needed to run a github-script step body")
+class ScriptStepCase(unittest.TestCase):
+    """Run a github-script body against stubs that behave like the API."""
+
+    action = None
+    step = None
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.body = step_script(self.action, self.step)
+
+    def write_report(self, text):
+        with open(os.path.join(self.tmp, "licence-gate-report.md"), "w",
+                  encoding="utf-8") as fh:
+            fh.write(text)
+
+    def run_step(self, comments=(), **env):
+        paths = {}
+        for name, content in (("step.js", self.body), ("harness.js", HARNESS)):
+            paths[name] = os.path.join(self.tmp, name)
+            with open(paths[name], "w", encoding="utf-8") as fh:
+                fh.write(content)
+        cfg = os.path.join(self.tmp, "cfg.json")
+        with open(cfg, "w", encoding="utf-8") as fh:
+            json.dump({"comments": list(comments)}, fh)
+        proc = subprocess.run(
+            [NODE, paths["harness.js"], paths["step.js"], cfg],
+            env={"PATH": os.environ["PATH"], "RUNNER_TEMP": self.tmp,
+                 **{k: v for k, v in env.items() if v is not None}},
+            capture_output=True, text=True)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        return json.loads(proc.stdout)
+
+
+class TestTheGateFindsItsOwnCommentOnALongThread(ScriptStepCase):
+    """One report, updated in place - not one report per push.
+
+    `listComments` unpaginated answers with the first 30 comments. Past that the
+    marker is not found, so every push posts a fresh report and the pull request
+    collects one copy per push. That is worst on a long-running pull request, which
+    is the one whose report a reviewer most needs to be able to trust as current.
+    The sibling action paginates this same call already.
+    """
+
+    action = "gate"
+    step = "Post or update the review comment"
+
+    def setUp(self):
+        super().setUp()
+        self.write_report("### Nothing to do — both checks pass\n")
+
+    def thread(self, length, marker_at):
+        comments = [f"ordinary discussion {i}" for i in range(length)]
+        if marker_at is not None:
+            comments[marker_at] = f"{MARKER}\n## Licence gate\n\nan earlier report"
+        return comments
+
+    def test_the_marker_is_found_past_the_first_page(self):
+        result = self.run_step(self.thread(45, 40), HEAD_SHA="a" * 40)
+        self.assertEqual(result["posted"], [],
+                         "a second report was posted alongside the one already there")
+        self.assertEqual(len(result["updated"]), 1)
+        self.assertIn(MARKER, result["updated"][0]["body"])
+
+    def test_the_marker_is_found_several_pages_in(self):
+        result = self.run_step(self.thread(260, 250), HEAD_SHA="a" * 40)
+        self.assertEqual(result["posted"], [])
+        self.assertEqual(len(result["updated"]), 1)
+
+    def test_the_marker_is_still_found_on_a_short_thread(self):
+        """The fix must not be a narrowing: the common case still updates."""
+        result = self.run_step(self.thread(4, 2), HEAD_SHA="a" * 40)
+        self.assertEqual(result["posted"], [])
+        self.assertEqual(len(result["updated"]), 1)
+
+    def test_the_first_report_is_posted(self):
+        result = self.run_step(self.thread(45, None), HEAD_SHA="a" * 40)
+        self.assertEqual(len(result["posted"]), 1)
+        self.assertIn(MARKER, result["posted"][0])
 
 
 if __name__ == "__main__":
