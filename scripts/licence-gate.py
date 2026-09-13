@@ -18,7 +18,7 @@ import re
 import sys
 
 from git_io import GateError, changed_files, git_show, merge_base, sh_strict
-from licence_map import (has_licence_header, leading_comment_lines,
+from licence_map import (SOURCE_RE, has_licence_header, leading_comment_lines,
                          leading_comment_region)
 
 NOTICE = "Modified by the Example project."
@@ -40,7 +40,12 @@ IGNORE_RE = re.compile(r"^(scripts/|\.github/|README\.md$|docs?/)")
 # about, so check_c always raises it. Same routing as binaries: out of the blocking
 # path, into the human one.
 VENDOR_RE = re.compile(r"^(vendor/|vendors/|third[_-]party/|node_modules/|external/)")
-SOURCE_RE = re.compile(r"\.(js|ts|py|c|h|cpp|css|less|java|go|rb|sh)$", re.I)
+# SOURCE_RE is imported from licence_map, not declared here. There were two, and they
+# disagreed: licence_map counted `.html` as source, so /std-licence would stamp a
+# header into one, while this file counted the same path as an asset. A term with two
+# definitions has no definition, and the last time that happened - three answers to
+# "has this file got a header" - a file our own tool stamped became invisible to both
+# blocking checks.
 # The files this programme records its own findings in. They are not licensed material
 # and their first line is not a header, whatever it looks like.
 #

@@ -1204,3 +1204,66 @@ class TestTheBaseIsTheMergeBase(GateCase):
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+
+
+class TestSourceIsTheRealEstatesSourceList(GateCase):
+    """SOURCE_RE was the example project's extension list, not a real codebase's.
+
+    The consuming repository is a PHP application with JS/TS front-ends, and `.php`,
+    `.vue`, `.tsx`, `.jsx`, `.mjs`, `.scss` and `.xml` matched neither the source
+    pattern nor the text pattern. check_a and check_b were never the problem - neither
+    filters by extension, so stripping a header from a `.php` file always blocked. The
+    hole was check_d: a NEW file with one of those extensions took the
+    `needs_provenance` branch, was listed as an asset, and never reached the
+    `SOURCE_RE` branch that blocks a headerless new source file. A new `.php` file with
+    no licence header at all merged with an advisory candidate and exit 0.
+    """
+
+    def _add_a_headerless_new_file(self, path):
+        self._git("commit", "-q", "--allow-empty", "-m", "base")
+        self.write(path, "const x = 1;\n")
+        self.commit("add a headerless source file")
+
+    def test_a_new_headerless_php_file_blocks(self):
+        self._add_a_headerless_new_file("src/thing.php")
+        report = self.assertBlocks("a new headerless .php file must block")
+        self.assertIn("no licence header", report)
+
+    def test_a_new_headerless_vue_file_blocks(self):
+        self._add_a_headerless_new_file("src/Thing.vue")
+        self.assertIn("no licence header",
+                      self.assertBlocks("a new headerless .vue file must block"))
+
+    def test_a_new_headerless_tsx_file_blocks(self):
+        self._add_a_headerless_new_file("src/Thing.tsx")
+        self.assertIn("no licence header",
+                      self.assertBlocks("a new headerless .tsx file must block"))
+
+    def test_a_new_headerless_scss_file_blocks(self):
+        self._add_a_headerless_new_file("src/thing.scss")
+        self.assertIn("no licence header",
+                      self.assertBlocks("a new headerless .scss file must block"))
+
+    def test_a_new_headerless_xml_file_blocks(self):
+        self._add_a_headerless_new_file("config/thing.xml")
+        self.assertIn("no licence header",
+                      self.assertBlocks("a new headerless .xml file must block"))
+
+    def test_a_dash_comment_header_is_visible_to_the_notice_check(self):
+        """`.sql` and `.lua` carry headers in `--` comments, which
+        `leading_comment_lines` did not recognise as a comment marker at all. Widening
+        SOURCE_RE without teaching it that marker would move these files OUT of the
+        asset path - where they at least raised a candidate - and into the source path,
+        where the leading comment region comes back empty and check_a concludes the
+        file has no header. That is the silent-no-header-check this fix exists to
+        avoid."""
+        self.write("src/schema.sql",
+                   "-- Copyright (c) 2020 Example Corp\n"
+                   "-- Licensed under the Example License 1.0\nSELECT 1;\n")
+        self.commit("base")
+        self.write("src/schema.sql",
+                   "-- Copyright (c) 2020 Example Corp\n"
+                   "-- Licensed under the Example License 1.0\nSELECT 2;\n")
+        self.commit("edit the query, keep the header")
+        report = self.assertBlocks("a -- comment header must be seen by check_a")
+        self.assertIn("missing a notice", report)

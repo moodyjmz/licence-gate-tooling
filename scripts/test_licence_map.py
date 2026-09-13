@@ -14,7 +14,8 @@ import unittest
 import importlib.util
 import pathlib
 
-from licence_map import (APPLY, REFUSE, classify, has_licence_header, header_block,
+from licence_map import (APPLY, COMMENT_STYLE, REFUSE, SOURCE_EXTENSIONS, SOURCE_RE,
+                         classify, comment_style_for, has_licence_header, header_block,
                          header_texts, insert_header, leading_comment_region,
                          licence_for)
 
@@ -142,8 +143,15 @@ class TestHeaderFormatting(unittest.TestCase):
         self.assertEqual(block[-1], "-->")
         self.assertNotIn("//", "\n".join(block))
 
-    def test_unknown_extension_falls_back_to_hash(self):
-        self.assertTrue(header_block("thing.conf", "Example-1.0")[0].startswith("# "))
+    def test_unknown_extension_is_refused_rather_than_defaulted_to_hash(self):
+        """REPLACES test_unknown_extension_falls_back_to_hash, which pinned the
+        opposite behaviour. The fallback pinned there was not a safe default: `#` is
+        not a comment marker in most of what reached it. A `.conf` got away with it; a
+        .png got `# SPDX-License-Identifier: ...` written into its bytes, and a .php
+        got a header printed to the page. "We have never heard of this type" and "use
+        a hash" are not the same answer, and only one of them is true."""
+        with self.assertRaises(ValueError):
+            header_block("thing.conf", "Example-1.0")
 
 
 class TestInsertionPoint(unittest.TestCase):
@@ -430,6 +438,58 @@ class TestNoFailureIsSilent(unittest.TestCase):
         self.assertEqual(code, 2)
         self.assertIn("unreachable base", out)
         self.assertNotIn("unexpected", out, "a named failure keeps its own wording")
+
+
+class TestOneDefinitionOfSource(unittest.TestCase):
+    """There were TWO source patterns and they disagreed about `.html`: licence_map
+    counted it as source (so /std-licence would stamp a header into one), the gate did
+    not (so the gate treated the same file as an asset). One definition of each term,
+    imported everywhere - three disagreeing definitions of "has a header" already made
+    a file invisible to every check once."""
+
+    def test_the_gate_uses_the_maps_definition(self):
+        self.assertIs(gate.SOURCE_RE, SOURCE_RE,
+                      "the gate must import the one definition, not re-declare it")
+
+    def test_html_is_source_at_both_ends(self):
+        self.assertTrue(SOURCE_RE.search("src/page.html"))
+        self.assertFalse(gate.is_asset("src/page.html"))
+
+
+class TestEverySourceFileCanCarryAHeader(unittest.TestCase):
+    """A file classified as source but with an unknown comment syntax would be handed
+    to `header_block`, which used to fall back to `#` for anything it did not know.
+    For a `.php`, a `.vue` or a `.sql` that fallback is not a comment at all: the
+    "header" becomes program text or page output. Refusing is the only honest answer,
+    and this invariant is what keeps the two tables from drifting apart."""
+
+    def test_every_source_extension_has_a_known_comment_style(self):
+        missing = sorted(e for e in SOURCE_EXTENSIONS if "." + e not in COMMENT_STYLE)
+        self.assertEqual(missing, [],
+                         "these are classified as source but have no comment syntax, "
+                         "so a header cannot be written into them")
+
+    def test_the_extension_list_and_the_pattern_agree(self):
+        for ext in SOURCE_EXTENSIONS:
+            self.assertTrue(SOURCE_RE.search("src/file." + ext), ext)
+
+    def test_an_unknown_file_type_has_no_comment_style_rather_than_a_guess(self):
+        self.assertEqual(comment_style_for("src/thing.php"), "//")
+        self.assertIsNone(comment_style_for("assets/logo.png"))
+        self.assertIsNone(comment_style_for("VENDORTOOL"))
+
+    def test_a_header_is_never_written_in_a_guessed_syntax(self):
+        """`COMMENT_STYLE.get(ext, "#")` meant every unknown type got a `#` header.
+        For a .png that writes text into a binary; for a .php outside `<?php` it
+        writes the header to the page. Refusing is the only honest answer."""
+        with self.assertRaises(ValueError):
+            header_block("assets/logo.png", "Example-1.0")
+
+    def test_a_type_with_nowhere_to_put_a_header_is_refused_not_stamped(self):
+        action, lic, reason = classify("assets/logo.png", True, False)
+        self.assertEqual(action, REFUSE)
+        self.assertIsNone(lic)
+        self.assertIn("comment syntax", reason)
 
 
 if __name__ == "__main__":

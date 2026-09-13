@@ -39,7 +39,34 @@ UNMAPPED = [
 ]
 
 ASSET_RE = re.compile(r"\.(svg|png|jpg|jpeg|gif|ico|woff2?|ttf|dat)$", re.I)
-SOURCE_RE = re.compile(r"\.(js|ts|py|c|h|cpp|css|less|java|go|rb|sh|html|htm)$", re.I)
+
+# Every extension treated as source, and therefore every extension a licence header
+# may have to be written into. A TUPLE rather than a regex literal, because the
+# invariant below - every one of these has a known comment syntax - is only testable
+# if the list can be enumerated. The regex is derived from it; there is nothing to
+# keep in step by hand.
+#
+# The list this replaces was the example project's, not a real codebase's: eleven
+# extensions, no `.php`, no `.vue`, no `.tsx`. The consuming repository is a PHP
+# application with JS/TS front-ends, so the gap was not hypothetical. check_a and
+# check_b never filtered by extension and were never affected; the hole was check_d,
+# where a NEW file with an unlisted extension took the asset branch and so never
+# reached the test that blocks a headerless new source file. A new `.php` file with no
+# licence header at all merged with an advisory candidate and exit 0.
+#
+# THIS IS ALSO THE ONE DEFINITION. There were two, in this module and in the gate, and
+# they disagreed about `.html`: stampable here, an asset there. One definition of each
+# term, imported everywhere - three disagreeing definitions of "has a header" made a
+# file invisible to every check once already.
+SOURCE_EXTENSIONS = (
+    "js", "jsx", "mjs", "cjs", "ts", "tsx", "mts", "cts",
+    "php", "py", "c", "h", "cpp", "java", "go", "rb", "pl", "lua", "sql",
+    "kt", "swift", "m", "mm", "rs", "scala", "groovy", "gradle", "proto",
+    "sh", "bash", "zsh", "ps1", "r", "tf",
+    "css", "scss", "sass", "less", "styl",
+    "html", "htm", "vue", "xml", "xsl",
+)
+SOURCE_RE = re.compile(r"\.(" + "|".join(SOURCE_EXTENSIONS) + r")$", re.I)
 
 APPLY = "apply"
 REFUSE = "refuse"
@@ -89,6 +116,17 @@ def classify(path, explicitly_named, has_header):
 
     if not (SOURCE_RE.search(path) or ASSET_RE.search(path)):
         return (REFUSE, None, "not a source or asset file; decide by hand whether it needs a header")
+
+    # Nowhere to put a header is a refusal, not a fallback. This used to be
+    # `COMMENT_STYLE.get(ext, "#")` one layer down, which stamped `# SPDX-...` into
+    # anything unrecognised - a .png included, since ASSET_RE admits binaries that have
+    # no comment syntax at all and never will. Writing text into a binary is a
+    # corruption the diff shows as an ordinary added line.
+    if comment_style_for(path) is None:
+        return (REFUSE, None,
+                "no comment syntax is known for this file type, so there is nowhere to "
+                "put a header; add the header by hand, or add the type to COMMENT_STYLE "
+                "if it genuinely has one")
 
     return (APPLY, lic, "")
 
@@ -184,6 +222,14 @@ CommentLine = collections.namedtuple("CommentLine", "index kind token closes_at"
 
 _BLOCK_STYLES = (("/*", "*/"), ("<!--", "-->"))
 
+# Line-comment markers this scan recognises. `--` is here because SQL and Lua are now
+# classified as source, and a source file whose comment marker this scan does not know
+# has an EMPTY leading comment region - so check_a reads it as carrying no header and
+# demands no modification notice, in silence. Widening what counts as source without
+# widening this is how a file gets moved out of the asset path, where it at least
+# raised a candidate, into the source path, where nothing looks at it.
+_LINE_MARKERS = ("//", "#", "--")
+
 
 def leading_comment_lines(content):
     """Classify every line of the file's leading comment region.
@@ -235,7 +281,7 @@ def leading_comment_lines(content):
             out.append(CommentLine(i, "block", "*/", at if at >= 0 else None))
             i += 1
             continue
-        marker = next((m for m in ("//", "#") if stripped.startswith(m)), None)
+        marker = next((m for m in _LINE_MARKERS if stripped.startswith(m)), None)
         if marker:
             out.append(CommentLine(i, "line", marker, None))
             i += 1
@@ -278,18 +324,62 @@ def header_lines(licence, comment="//"):
 
 # How each extension spells a comment. The value is the OPENING token; block styles
 # are recognised by it and closed accordingly.
+#
+# EVERY EXTENSION IN SOURCE_EXTENSIONS MUST APPEAR HERE, and a test enforces it. A
+# file classified as source is a file the gate will demand a header in and this tool
+# may be asked to write one into; if its comment syntax is unknown, both of those are
+# guesses. The old fallback made the guess silently - `COMMENT_STYLE.get(ext, "#")` -
+# so an unknown type got a `#` header whether or not `#` starts a comment in it.
 COMMENT_STYLE = {
     ".js": "//", ".ts": "//", ".c": "//", ".h": "//", ".cpp": "//",
     ".java": "//", ".go": "//", ".css": "/*", ".less": "/*",
     ".py": "#", ".sh": "#", ".rb": "#",
     ".html": "<!--", ".htm": "<!--", ".svg": "<!--",
+    # Added with SOURCE_EXTENSIONS above.
+    ".jsx": "//", ".mjs": "//", ".cjs": "//", ".tsx": "//",
+    ".mts": "//", ".cts": "//",
+    # PHP's header goes after the `<?php` line - see _MUST_STAY_FIRST - because a
+    # comment above it is not a comment, it is page output.
+    ".php": "//",
+    ".kt": "//", ".swift": "//", ".rs": "//", ".scala": "//",
+    ".groovy": "//", ".gradle": "//", ".proto": "//", ".styl": "//",
+    # `.m` and `.mm` are taken as Objective-C. `.m` is also MATLAB, whose comment
+    # marker is `%` - see the module note; this picks the likelier of the two rather
+    # than pretending the ambiguity is resolved.
+    ".m": "//", ".mm": "//",
+    ".scss": "/*",
+    # Indented Sass has no `/* */`; `//` is its only comment form.
+    ".sass": "//",
+    ".bash": "#", ".zsh": "#", ".ps1": "#", ".r": "#", ".tf": "#", ".pl": "#",
+    # SQL and Lua both comment with `--`, which leading_comment_lines now recognises.
+    ".sql": "--", ".lua": "--",
+    ".xml": "<!--", ".xsl": "<!--", ".vue": "<!--",
 }
 
 
+def comment_style_for(path):
+    """The comment syntax this file type uses, or None when we do not know.
+
+    None is an ANSWER, and callers must treat it as one. The lookup it replaces ended
+    `.get(ext, "#")`, which turned "we have never heard of this type" into "use a hash"
+    - writing `# SPDX-License-Identifier: ...` into a .png as readily as into a .py.
+    """
+    return COMMENT_STYLE.get("." + path.rsplit(".", 1)[-1].lower())
+
+
 def header_block(path, licence):
-    """The header for this file, as lines, in the comment syntax its type uses."""
-    ext = "." + path.rsplit(".", 1)[-1].lower()
-    style = COMMENT_STYLE.get(ext, "#")
+    """The header for this file, as lines, in the comment syntax its type uses.
+
+    Raises ValueError rather than guessing a syntax. classify() refuses such a path
+    before anything gets here, so this is the second lock on the same door: a remedy
+    may refuse, it may not guess.
+    """
+    style = comment_style_for(path)
+    if style is None:
+        raise ValueError(
+            f"no comment syntax is known for `{path}`, so a header cannot be written "
+            f"into it without guessing; add its extension to COMMENT_STYLE or add the "
+            f"header by hand")
     texts = header_texts(licence)
     if style == "/*":
         return ["/*"] + [f" * {t}" for t in texts] + [" */"]
@@ -299,12 +389,15 @@ def header_block(path, licence):
 
 
 # Lines that MUST stay first in the file. Prepending above a shebang stops a script
-# executing; prepending above an XML declaration makes the document invalid. Both
-# were live risks - .sh, .py and .svg are all in the table above - and both fail
-# quietly, in the sense that the header looks perfectly correct in the diff.
+# executing; prepending above an XML declaration makes the document invalid; prepending
+# above `<?php` puts the text outside PHP mode, where it is not a comment but output
+# written straight to the page - and output before a header breaks every redirect and
+# cookie the request goes on to set. All three fail quietly, in the sense that the
+# header looks perfectly correct in the diff.
 _MUST_STAY_FIRST = (
     re.compile(r"^#!"),
     re.compile(r"^<\?xml[\s?]", re.I),
+    re.compile(r"^<\?php\b", re.I),
 )
 
 
