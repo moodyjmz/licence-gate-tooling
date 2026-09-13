@@ -276,6 +276,73 @@ def is_upstream_author(name, email, patterns):
     return False
 
 
+def introduced_commits(sha, parents):
+    """The commits a merge BROUGHT IN, or None when the commit is not a merge.
+
+    For parents P1 (first) and P2 that is `P1..P2`; for an octopus it is the union,
+    `P2 P3 ... ^P1`. The union is the conservative reading: a larger introduced set
+    makes "every commit here is upstream's" harder to satisfy, and leaning towards
+    inclusion is the failure direction this tool has chosen everywhere else.
+
+    A range that cannot be READ raises. "Could not work out what this merge
+    introduced" and "it introduced nothing of ours" decide opposite things about
+    whether the entry is written at all, so they must never share a code path - and
+    the likely causes (a shallow clone, a partial clone, a pruned object) are exactly
+    the ones that produce an empty answer from a tolerant call.
+    """
+    if len(parents) < 2:
+        return None
+    first, rest = parents[0], parents[1:]
+    fmt = RS + FS.join(["%an", "%ae", "%s"])
+    try:
+        out = sh_strict("git", "log", "--reverse", f"--format={fmt}",
+                        *rest, f"^{first}", "--")
+    except GateError as exc:
+        raise GateError(
+            f"could not list the commits {sha[:7]} brought in ({first[:7]}..{rest[0][:7]}"
+            f"{' and further parents' if len(rest) > 1 else ''}): {exc}\n"
+            f"Whether that merge is ours or upstream's is decided by those commits, so "
+            f"this is not a merge with nothing in it - it is a merge nothing can be "
+            f"said about. A shallow or partial clone is the usual cause; set "
+            f"fetch-depth: 0.") from exc
+    commits = []
+    for record in out.split(RS):
+        if not record.strip("\n"):
+            continue
+        fields = record.split(FS, 2)
+        if len(fields) < 3:
+            raise GateError(
+                f"could not parse a `git log` record for {sha[:7]} "
+                f"({len(fields)} of 3 fields): {record[:120]!r}")
+        commits.append((fields[0], fields[1], fields[2].strip()))
+    return commits
+
+
+def is_upstream_change(name, email, introduced, patterns):
+    """Is this entry upstream's work rather than ours?
+
+    The author of a MERGE commit is whoever performed the merge, which on a fork is
+    whoever was on duty - not whoever wrote the change. Reading that field lets every
+    routine upstream sync we merged ourselves into the notice as our own modification,
+    and drops our own work whenever an upstream maintainer or a bot did the merging.
+    The second direction is the one that matters: a spurious entry is noise somebody
+    deletes, a missing one is a compliance gap nobody can see.
+
+    So a merge is upstream's only when EVERY commit it introduced is upstream-authored.
+    A commit with no second parent has introduced nothing and is judged by its own
+    author, which for a non-merge is the person who wrote it.
+    """
+    if introduced is None:
+        return is_upstream_author(name, email, patterns)
+    if not introduced:
+        # A merge that brought in nothing at all - a second parent already reachable
+        # from the first. "Every commit it introduced is upstream's" is vacuously true
+        # of an empty set, and excluding an entry on a technicality is the failure
+        # direction this tool does not take. No evidence means ours.
+        return False
+    return all(is_upstream_author(n, e, patterns) for n, e, _ in introduced)
+
+
 def subject_for(subject, body, sha, warn):
     """The title of the CHANGE, which is not always the subject of the commit.
 
@@ -349,22 +416,33 @@ def collect_entries(baseline_sha, head, patterns, warn):
 
     The format is explicit and the separators are C0 controls, not newlines. Fields
     are split with a cap so a body can contain anything at all without reshaping the
-    record, and a record with too FEW fields raises rather than being skipped.
+    record, and a record with too FEW fields raises rather than being skipped. `%b` is
+    LAST because it is the only field allowed to contain arbitrary text: put anything
+    after it and the body quietly swallows it.
+
+    The cost is a git call per first-parent commit, and now two for a merge: one to
+    read what it introduced, one for the notice-only check. That is not reducible to a
+    single traversal of `baseline..head`. A merge's second-parent side can reach back
+    BEFORE the baseline, so `P1..P2` is not a subset of what that traversal lists, and
+    computing membership locally from it would silently lose introduced commits - in
+    the direction of reading our own work as upstream's, which is the failure this
+    module is here to prevent.
     """
-    fmt = RS + FS.join(["%H", "%h", "%an", "%ae", "%ad", "%s", "%b"])
+    fmt = RS + FS.join(["%H", "%h", "%an", "%ae", "%ad", "%s", "%P", "%b"])
     out = sh_strict("git", "log", "--first-parent", "--reverse", "--abbrev=7",
                     "--date=short", f"--format={fmt}", f"{baseline_sha}..{head}", "--")
     entries = []
     for record in out.split(RS):
         if not record.strip():
             continue
-        fields = record.split(FS, 6)
-        if len(fields) < 7:
+        fields = record.split(FS, 7)
+        if len(fields) < 8:
             raise GateError(
-                f"could not parse a `git log` record ({len(fields)} of 7 fields): "
+                f"could not parse a `git log` record ({len(fields)} of 8 fields): "
                 f"{record[:120]!r}")
-        full, short, name, email, date, subject, body = fields
-        if is_upstream_author(name, email, patterns):
+        full, short, name, email, date, subject, parents, body = fields
+        introduced = introduced_commits(full, parents.split())
+        if is_upstream_change(name, email, introduced, patterns):
             continue
         if touches_only_the_notice(full):
             continue

@@ -12,12 +12,19 @@
 #   upstream          display name of the upstream project
 #   baseline          the commit the fork starts from
 #   baseline_date     ISO date of that commit
-#   upstream_authors  fnmatch patterns - matched against the author's name and
-#                     address, case-insensitively - whose commits are upstream's work
-#                     and not ours. A pattern with no wildcard is an exact match.
-#                     An author matching nothing here counts as OURS: a spurious
-#                     entry is noise, a missing one is a gap nobody can see.
-#                     The key is required even when the list is empty.
+#   upstream_authors  fnmatch patterns - matched against an author's name and
+#                     address, case-insensitively - naming the people and bots whose
+#                     commits are upstream's work and not ours. A pattern with no
+#                     wildcard is an exact match. An author matching nothing here
+#                     counts as OURS: a spurious entry is noise, a missing one is a
+#                     gap nobody can see. The key is required even when empty.
+#
+#                     A MERGE is judged by the commits it brought in, not by its own
+#                     author - the author of a merge is whoever performed it, so
+#                     reading that field would file every upstream sync we merged
+#                     ourselves as our own work, and drop our own work whenever an
+#                     upstream maintainer or bot did the merging. A merge counts as
+#                     upstream's only when every commit it introduced does.
 
 ["moodyjmz/licence-gate-target"]
 upstream = "Example Upstream"

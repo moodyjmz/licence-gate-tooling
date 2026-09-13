@@ -26,7 +26,8 @@ GATE = os.path.join(HERE, "licence-gate.py")
 
 sys.path.insert(0, HERE)
 
-from modifications import ConfigError, parse_toml  # noqa: E402
+from modifications import (  # noqa: E402
+    ConfigError, GateError, introduced_commits, parse_toml)
 
 REPO = "example-owner/example-fork"
 
@@ -96,6 +97,43 @@ class RepoCase(unittest.TestCase):
         self.write(path, content)
         self.commit(message, author=author, date=date)
         self._git("checkout", "-q", "main")
+
+    def on_branch(self, branch, *commits, base="main"):
+        """A branch off `base` carrying (path, message, author) commits."""
+        self._git("checkout", "-q", "-b", branch, base)
+        for path, message, author in commits:
+            self.write(path, "x\n")
+            self.commit(message, author=author)
+        self._git("checkout", "-q", "main")
+
+    def octopus(self, subject, body, branches, author=None):
+        args = ["merge", "--no-ff", "-q", "-m", subject]
+        if body is not None:
+            args += ["-m", body]
+        self._git(*args, *branches, author=author)
+        return self.sha("HEAD")
+
+    def merge_introducing_nothing(self, subject, body, ancestor, author=None):
+        """A merge whose second parent is already reachable from its first.
+
+        git refuses to record one with `merge --no-ff` (it is already up to date),
+        so it is built by hand - but a rebase, a revert of a merge and a hand-made
+        integration commit all produce this shape in real history."""
+        args = ["commit-tree", self.sha("HEAD^{tree}"), "-p", "HEAD", "-p", ancestor,
+                "-m", subject]
+        if body is not None:
+            args += ["-m", body]
+        new = self._git(*args, author=author).stdout.strip()
+        self._git("reset", "--hard", "-q", new)
+        return new
+
+    def drop_object(self, sha):
+        """Delete a loose object, which is how a range stops being computable.
+
+        A garbage-collected object, a shallow clone and a partial clone all present
+        the same way to `git log`: the commit is named in its child's parent list
+        and cannot be read."""
+        os.remove(os.path.join(self.dir, ".git", "objects", sha[:2], sha[2:]))
 
     # --------------------------------------------------------------------- runner
 
@@ -244,6 +282,135 @@ class TestTheScopeFilter(RepoCase):
         self.write("src/a.js", "x\n")
         self.commit("feat: ours", author=("Up Stream", "dev@upstream.example.org"))
         self.assertEqual(self.subjects(), ["feat: ours"])
+
+
+class TestOwnershipComesFromWhatAMergeIntroduces(RepoCase):
+    """Who authored a merge commit is who pressed the button, not who wrote the code.
+
+    On a fork the filter's whole job is to drop routine upstream syncs, and those are
+    merged by whoever is on duty here - so judging a merge by its own author lets every
+    sync in, and drops our own work whenever a bot or an upstream maintainer did the
+    merging. The second direction is the dangerous one: a missing entry is a compliance
+    gap nobody can see.
+
+    So a merge is upstream only when EVERY commit it introduced is upstream-authored.
+    Any of ours on that side and the whole merge is ours."""
+
+    upstream_authors = ["*@upstream.example.org", "upstream-release-bot"]
+    UPSTREAM = ("Up Stream", "dev@upstream.example.org")
+    ALSO_UPSTREAM = ("Other Stream", "other@upstream.example.org")
+    OURS = ("Fork Dev", "dev@example-fork.test")
+
+    def setUp(self):
+        super().setUp()
+        self.write("README.md", "base\n")
+        self.baseline = self.commit("feat: base")
+        self.write_config()
+
+    def test_an_upstream_sync_merged_by_one_of_us_is_excluded(self):
+        """The defect. Somebody here merges the weekly sync, and the sync becomes a
+        modification of ours - in the large majority of a real fork's history."""
+        self.on_branch("sync", ("src/u.js", "upstream: rework the parser", self.UPSTREAM),
+                       ("src/v.js", "upstream: tidy the parser", self.ALSO_UPSTREAM))
+        self.merge("sync", "Merge branch 'sync'", "Sync with upstream")
+        self.assertEqual(self.subjects(), [],
+                         "the merge author is irrelevant; both sides are upstream's work")
+
+    def test_a_merge_introducing_a_mix_is_included(self):
+        self.on_branch("mixed", ("src/u.js", "upstream: rework the parser", self.UPSTREAM),
+                       ("src/o.js", "feat: our own change", self.OURS))
+        self.merge("mixed", "Merge pull request #7 from owner/mixed", "Land the mixed branch",
+                   author=self.UPSTREAM)
+        self.assertEqual(self.subjects(), ["Land the mixed branch"],
+                         "one commit of ours on that side makes the whole merge ours")
+
+    def test_our_work_merged_by_an_upstream_identity_is_included(self):
+        self.on_branch("ours", ("src/o.js", "feat: our own change", self.OURS))
+        self.merge("ours", "Merge pull request #8 from owner/ours", "Introduce the tile icon",
+                   author=("upstream-release-bot", "bot@upstream.example.org"))
+        self.assertEqual(self.subjects(), ["Introduce the tile icon"],
+                         "an upstream bot doing the merging must not erase our entry")
+
+    def test_a_direct_commit_is_judged_by_its_own_author(self):
+        """No second parent, nothing introduced: the author IS the person who wrote it."""
+        self.write("src/u.js", "x\n")
+        self.commit("upstream: rework the parser", author=self.UPSTREAM)
+        self.write("src/o.js", "x\n")
+        self.commit("feat: our own change", author=self.OURS)
+        self.assertEqual(self.subjects(), ["feat: our own change"])
+
+    def test_an_octopus_merge_is_upstream_only_when_every_side_is(self):
+        self.on_branch("up-a", ("src/a.js", "upstream: one", self.UPSTREAM))
+        self.on_branch("up-b", ("src/b.js", "upstream: two", self.ALSO_UPSTREAM))
+        self.octopus("Merge branches 'up-a' and 'up-b'", "Sync two upstream branches",
+                     ["up-a", "up-b"])
+        self.assertEqual(self.subjects(), [])
+
+    def test_an_octopus_merge_with_one_side_of_ours_is_included(self):
+        """The union of every non-first parent, `P2 P3 ... ^P1`. A bigger introduced
+        set makes "all upstream" harder to satisfy, which leans to inclusion."""
+        self.on_branch("up-a", ("src/a.js", "upstream: one", self.UPSTREAM))
+        self.on_branch("our-b", ("src/b.js", "feat: ours", self.OURS))
+        self.octopus("Merge branches 'up-a' and 'our-b'", "Land two branches at once",
+                     ["up-a", "our-b"], author=self.UPSTREAM)
+        self.assertEqual(len(self.subjects()), 1)
+
+    def test_a_merge_that_introduces_nothing_is_ours(self):
+        """Vacuously, every commit it introduced is upstream's - which would exclude it
+        on a technicality. There is no evidence either way, and the chosen failure
+        direction is over-reporting, so it stays."""
+        self.write("src/a.js", "x\n")
+        ancestor = self.commit("feat: something earlier", author=self.OURS)
+        self.write("src/b.js", "x\n")
+        self.commit("feat: something later", author=self.OURS)
+        self.merge_introducing_nothing("Merge branch 'stale'", "Fold in the stale branch",
+                                       ancestor, author=self.UPSTREAM)
+        self.assertIn("Fold in the stale branch", self.subjects())
+
+    def test_an_empty_range_and_an_unreadable_one_are_not_the_same_answer(self):
+        """The distinction the whole module turns on, at the one seam that decides
+        whether an entry is written: a merge that introduced nothing answers with an
+        empty list, and a merge whose range cannot be READ raises.
+
+        Driven directly because end to end the two cannot be told apart from outside:
+        every way of making a range unreadable - a pruned object, a shallow clone -
+        also breaks the merge-base this tool computes first, so the run stops earlier
+        with that message instead. This guard catches the case where availability
+        changes mid-run: a concurrent gc, or a partial clone whose lazy fetch fails."""
+        self.write("src/a.js", "x\n")
+        ancestor = self.commit("feat: something earlier", author=self.OURS)
+        self.write("src/b.js", "x\n")
+        self.commit("feat: something later", author=self.OURS)
+        merge = self.merge_introducing_nothing("Merge branch 'stale'", None, ancestor)
+        first = self.sha("HEAD^1")
+
+        here = os.getcwd()
+        os.chdir(self.dir)
+        try:
+            self.assertEqual(introduced_commits(merge, [first, ancestor]), [],
+                             "introduced nothing: an answer, and a legitimate one")
+            with self.assertRaises(GateError) as caught:
+                introduced_commits(merge, [first, "b" * 40])
+        finally:
+            os.chdir(here)
+        message = str(caught.exception)
+        self.assertIn("brought in", message)
+        self.assertIn("fetch-depth: 0", message)
+        self.assertNotIn("cannot be resolved", message,
+                         "distinguishable from an unresolvable baseline")
+        self.assertNotIn("NOT an ancestor", message,
+                         "distinguishable from a baseline off the branch")
+
+    def test_an_unreadable_object_writes_no_notice_at_all(self):
+        """Whatever stops the history being read, the answer is never a shorter
+        notice."""
+        self.on_branch("gone", ("src/a.js", "feat: ours", self.OURS))
+        self.merge("gone", "Merge pull request #9 from owner/gone", "Introduce the thing")
+        self.drop_object(self.sha("HEAD^2"))
+        code, out, err = self.run_gen()
+        self.assertEqual(code, 2, f"a history that cannot be read is not an empty one\n{out}")
+        self.assertIn("fetch-depth: 0", err)
+        self.assertNotIn("Forked from", out)
 
 
 class TestTheFileShape(RepoCase):
