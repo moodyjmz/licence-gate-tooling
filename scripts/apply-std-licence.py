@@ -13,7 +13,7 @@ inference is visible rather than silent.
 
 import sys
 
-from git_io import GateError, changed_files
+from git_io import GateError, changed_files, merge_base
 from licence_map import (APPLY, classify, has_licence_header,
                          insert_header, leading_comment_region)
 
@@ -64,6 +64,15 @@ def main(argv):
         print(__doc__.strip())
         return 2
     base, head, explicit = argv[0], argv[1], set(argv[2:])
+    # ONE resolution, before anything reads git, exactly as licence-gate.py does it.
+    # What arrives is the base BRANCH'S TIP, so everything the base branch has done
+    # since the branch was cut is billed to this pull request in reverse: a file
+    # DELETED on the base branch comes back as a file this pull request ADDED, and
+    # naming it in the command stamps a first-party copyright header onto content
+    # this branch never contributed - under an assertion nobody made about it.
+    # merge_base raises rather than falling back: an unresolvable base means nothing
+    # was examined, which is not the same thing as nothing needing a decision.
+    base = merge_base(base, head)
     # Paths may also arrive via a file, so a comment body never reaches a shell.
     try:
         with open("/tmp/explicit-paths.txt", encoding="utf-8") as fh:
