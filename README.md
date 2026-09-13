@@ -123,6 +123,13 @@ permissions, checkout, and the pinned `uses:`. Everything else is here.
 cd scripts && python3 -m unittest discover -p 'test_*.py'
 ```
 
+**Python 3.9 or newer**, with no third-party packages beyond PyYAML for the tests.
+3.9 is not nostalgia: it is what a contributor's system Python is likely to be, and
+holding it is why the two places that would otherwise use `tomllib` (3.11) parse what
+little TOML they need themselves. CI runs the suite at both ends of that range, so a
+construct newer than the floor fails here rather than on somebody's laptop. Running
+the action definitions needs node.
+
 `test_licence_map` covers the pure decisions. `test_gate_integration` drives the gate
 against real throwaway git repositories, because every defect found in the security
 audits lived in the git-interacting code and none were reachable from a pure-function

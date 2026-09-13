@@ -5,9 +5,26 @@ permissions:
 jobs:
   unit:
     runs-on: ubuntu-latest
+    # Both ends of the supported range, because only the ends fail. The floor is what
+    # a contributor has to hand - a system Python is routinely several releases behind
+    # a runner image - and the ceiling is what the runner will move to on its own. With
+    # neither pinned, the suite tested whatever the image shipped that week, and a
+    # construct newer than the floor would land unnoticed.
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ['3.9', '3.13']
     steps:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      # The action definitions are javascript, and the suite executes them. Taking
+      # node from whatever the image happens to ship is the same untested floor.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
       - working-directory: scripts
         run: python3 -m unittest discover -p 'test_*.py' -v

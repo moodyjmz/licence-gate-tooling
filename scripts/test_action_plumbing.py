@@ -250,6 +250,46 @@ class TestTemporaryFilesAreScopedToTheRun(unittest.TestCase):
                 self.assertIn("steps", yaml.safe_load(path.read_text())["runs"])
 
 
+class TestTheSupportedPythonVersionsAreStatedAndTested(unittest.TestCase):
+    """The floor has to be a tested claim, not a habit.
+
+    With no `setup-python`, the suite ran against whatever the runner image happened
+    to ship. The code states 3.9 as the floor in two module comments and works around
+    `tomllib` twice to hold it - so a 3.10-only construct would go in unnoticed, and
+    the first person to see it would be a contributor on a system Python, or nobody
+    until a runner image moved underneath everyone.
+    """
+
+    WORKFLOW = ROOT / ".github" / "workflows" / "tests.yml"
+    README = ROOT / "README.md"
+
+    def setUp(self):
+        self.workflow = yaml.safe_load(self.WORKFLOW.read_text())
+        self.job = self.workflow["jobs"]["unit"]
+
+    def versions(self):
+        matrix = self.job["strategy"]["matrix"]
+        return [str(v) for v in matrix["python"]]
+
+    def test_more_than_one_version_is_exercised(self):
+        """A single version is the same untested floor with a version number on it."""
+        self.assertGreater(len(self.versions()), 1)
+
+    def test_the_oldest_tested_version_is_the_one_the_readme_promises(self):
+        stated = re.search(r"Python (\d+\.\d+) or newer", self.README.read_text())
+        self.assertIsNotNone(stated, "the README does not state a minimum version")
+        self.assertEqual(min(self.versions(), key=lambda v: [int(n) for n in v.split(".")]),
+                         stated.group(1),
+                         "the floor the README promises is not the floor CI tests")
+
+    def test_the_interpreters_are_installed_rather_than_assumed(self):
+        uses = [str(step.get("uses", "")) for step in self.job["steps"]]
+        self.assertTrue(any(u.startswith("actions/setup-python@") for u in uses))
+        # The action bodies are javascript and the suite now executes them. Taking
+        # node from whatever the image ships is the defect this class is about.
+        self.assertTrue(any(u.startswith("actions/setup-node@") for u in uses))
+
+
 class TestNoCheckoutLeavesTheTokenOnDisk(unittest.TestCase):
     """`persist-credentials: false` everywhere, not merely in the examples.
 
