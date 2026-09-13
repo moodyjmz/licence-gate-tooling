@@ -27,6 +27,7 @@ import yaml
 
 ROOT = Path(__file__).resolve().parent.parent
 ACTIONS = ROOT / "actions"
+EXAMPLES = ROOT / "examples"
 
 # The two spellings of "a temporary directory, or /tmp when nothing says otherwise" -
 # one for bash, one for the javascript steps. Both are already used in the actions.
@@ -247,6 +248,37 @@ class TestTemporaryFilesAreScopedToTheRun(unittest.TestCase):
         for path in sorted(ACTIONS.glob("*/action.yml")):
             with self.subTest(action=path.parent.name):
                 self.assertIn("steps", yaml.safe_load(path.read_text())["runs"])
+
+
+class TestNoCheckoutLeavesTheTokenOnDisk(unittest.TestCase):
+    """`persist-credentials: false` everywhere, not merely in the examples.
+
+    Left persisted, the token is written into the checkout's `.git/config` as an
+    authorisation header and stays there for every later step in the job - including
+    steps running over a tree that came from a pull request. Every example workflow
+    sets it; the two actions that check out for themselves did not.
+    """
+
+    def checkouts(self):
+        for path in sorted(ACTIONS.glob("*/action.yml")) + sorted(EXAMPLES.glob("*.yml")):
+            definition = yaml.safe_load(path.read_text())
+            if "runs" in definition:
+                steps = definition["runs"]["steps"]
+            else:
+                steps = [s for job in definition["jobs"].values() for s in job["steps"]]
+            for step in steps:
+                if str(step.get("uses", "")).startswith("actions/checkout@"):
+                    yield path, step
+
+    def test_every_checkout_refuses_to_persist_the_token(self):
+        found = 0
+        for path, step in self.checkouts():
+            found += 1
+            with self.subTest(definition=path.name, step=step.get("name", step["uses"])):
+                self.assertIs((step.get("with") or {}).get("persist-credentials"), False,
+                              f"{path} leaves the token in the checkout's config for "
+                              f"every step after it")
+        self.assertTrue(found, "no checkout steps were examined at all")
 
 
 class MoveCheckCase(unittest.TestCase):

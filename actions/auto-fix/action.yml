@@ -80,6 +80,10 @@ runs:
         ref: ${{ steps.auth.outputs.head_sha }}
         fetch-depth: 0
         token: ${{ inputs.token }}
+        # The token is used for the fetch and is not written into the checkout's
+        # config afterwards. Persisted, it stays available to every later step in the
+        # job, and the tree those steps run over came from a pull request.
+        persist-credentials: false
 
     - name: Refuse if the branch moved after the command
       if: steps.auth.outputs.ok == 'true'
