@@ -261,6 +261,84 @@ class TestCheckBWithoutADiffParser(GateCase):
         self.assertIn("vendor/dep", report)
 
 
+class TestTheRegisterDoesNotBlockItself(GateCase):
+    """The two files this whole programme writes its records into blocked every attempt
+    to write a record into them.
+
+    `leading_comment_lines` reads a Markdown `#` heading as a line comment, so a
+    MODIFICATIONS.md opening `# Modifications - licensed under the GNU AGPL v3` appears
+    to carry a licence header, and check A demanded a modification notice INSIDE the
+    notice file. Entries naming a copyright holder match NAMED_COPYRIGHT_RE too, so
+    editing a row read as altering a licence line and adding one read as an ownership
+    claim. Recording a replacement was blocked by the gate that asked for the record.
+
+    They are NOT in IGNORE_RE, deliberately. Ignoring them would make deleting
+    previously-recorded rows invisible, which is a worse defect than this one. They are
+    simply not files whose "header" means anything."""
+
+    LOG = ("# Modifications - licensed under the GNU AGPL v3\n"
+           "\n"
+           "| date | file | holder | what |\n"
+           "| --- | --- | --- | --- |\n"
+           "| 2026-01-02 | src/a.js | Copyright (c) 2020 Example Corp | replaced |\n")
+
+    def _candidates(self):
+        p = subprocess.run(["python3", GATE, "--candidates", "HEAD~1", "HEAD"],
+                           cwd=self.dir, capture_output=True, text=True)
+        return p.stdout.split()
+
+    def test_appending_an_entry_to_the_notice_file_is_not_a_finding(self):
+        for path in ("MODIFICATIONS.md", "src/REPLACEMENTLOG.md"):
+            with self.subTest(path=path):
+                self.write(path, self.LOG)
+                self.commit(f"base {path}")
+                self.write(path, self.LOG +
+                           "| 2026-02-03 | src/b.js | Copyright (c) 2011 Upstream Foundry"
+                           " | replaced |\n")
+                self.commit(f"record a replacement in {path}")
+                report = self.assertClean(
+                    "recording a replacement must not be blocked by the gate that "
+                    "asked for the record")
+                self.assertNotIn("Ownership claimed", report,
+                                 "a row naming a holder is a record, not a claim")
+                self.assertNotIn("missing a notice", report)
+
+    def test_editing_an_entry_naming_a_holder_is_not_a_finding(self):
+        self.write("MODIFICATIONS.md", self.LOG)
+        self.commit("base")
+        self.write("MODIFICATIONS.md",
+                   self.LOG.replace("| replaced |", "| replaced wholesale |"))
+        self.commit("correct a row")
+        report = self.assertClean("correcting a row must not read as altering a licence")
+        self.assertNotIn("removed or altered", report)
+        self.assertNotIn("Ownership claimed", report)
+
+    def test_the_notice_file_still_reaches_the_gate(self):
+        """The exclusion is scoped to the header logic. The path stays in every list the
+        gate builds, so deleting the register is still an event a human must answer -
+        which is what IGNORE_RE would have thrown away.
+
+        What this test can observe is that the path reaches the acknowledgement gate.
+        Append-only enforcement for these files is NOT built; see the class docstring."""
+        self.write("MODIFICATIONS.md", self.LOG)
+        self.write("src/a.js", "const a = 1;\n")
+        self.commit("base")
+        os.remove(os.path.join(self.dir, "MODIFICATIONS.md"))
+        self.commit("delete the register")
+        self.assertIn("MODIFICATIONS.md", self._candidates(),
+                      "the register is not ignored; losing it is an event")
+
+    def test_an_ordinary_markdown_file_is_unaffected(self):
+        """The exclusion names two files. A third document that happens to open with a
+        licence-shaped heading is not one of them - it is only IGNORE_RE, and only under
+        the paths IGNORE_RE names, that keeps documentation out of check A."""
+        self.write("docs/NOTES.md", "# Copyright (c) 2020 Example Corp\n\nNotes.\n")
+        self.commit("base")
+        self.write("docs/NOTES.md", "# Copyright (c) 2020 Example Corp\n\nMore notes.\n")
+        self.commit("edit the notes")
+        self.assertClean("docs/ is ignored on its own account, as it always was")
+
+
 class TestDeletionIsAnswerableNotUnresolvable(GateCase):
     """Found by a red-team round. `git rm src/licensed_file.js` blocked, telling the
     reader to "restore the 2 licence lines ... by hand" - into a file that no longer

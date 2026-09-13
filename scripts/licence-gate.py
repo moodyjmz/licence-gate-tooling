@@ -41,6 +41,27 @@ IGNORE_RE = re.compile(r"^(scripts/|\.github/|README\.md$|docs?/)")
 # path, into the human one.
 VENDOR_RE = re.compile(r"^(vendor/|vendors/|third[_-]party/|node_modules/|external/)")
 SOURCE_RE = re.compile(r"\.(js|ts|py|c|h|cpp|css|less|java|go|rb|sh)$", re.I)
+# The files this programme records its own findings in. They are not licensed material
+# and their first line is not a header, whatever it looks like.
+#
+# It looks like one. `leading_comment_lines` reads a Markdown `#` heading as a line
+# comment, so a MODIFICATIONS.md opening `# Modifications - licensed under the GNU AGPL
+# v3` carried a licence header as far as check A was concerned, and appending an entry
+# demanded a modification notice inside the notice file itself. Rows naming a copyright
+# holder match NAMED_COPYRIGHT_RE as well, so editing one read as altering a licence
+# line and adding one read as an ownership claim. Writing the record the gate asks for
+# was blocked by the gate that asked for it.
+#
+# NOT ADDED TO IGNORE_RE, and that distinction is the whole design. IGNORE_RE drops a
+# path out of the gate's sight, which would make deleting previously-recorded rows
+# invisible - a worse defect than the one being fixed, and precisely the wrong one for
+# an append-only record. These paths stay in every list the gate builds and still reach
+# check_c; they are excluded from the HEADER logic of checks A and B and from nothing
+# else.
+#
+# Append-only enforcement for these files is not built. Nothing here stops a row being
+# deleted; check_c raises the file, and a human reads it.
+NOTICE_FILE_RE = re.compile(r"(^|/)(MODIFICATIONS|REPLACEMENTLOG)\.md$", re.I)
 # Text that is not licensed material in its own right and is not a replaceable asset.
 TEXT_RE = re.compile(r"\.(md|txt|json|ya?ml|toml|ini|cfg|lock)$|^[^.]+$", re.I)
 
@@ -100,6 +121,18 @@ def both_ends_ignorable(old_path, new_path):
     """
     ends = [p for p in (old_path, new_path) if p]
     return bool(ends) and all(IGNORE_RE.match(p) for p in ends)
+
+
+def both_ends_notice_files(old_path, new_path):
+    """True when EVERY end of a change is one of the record files.
+
+    Same shape as both_ends_ignorable, for the same reason: testing the new path alone
+    would let a rename launder an edit. Renaming a licensed source file to
+    MODIFICATIONS.md in the commit that guts its header must not buy an exemption from
+    the check that would have caught it.
+    """
+    ends = [p for p in (old_path, new_path) if p]
+    return bool(ends) and all(NOTICE_FILE_RE.search(p) for p in ends)
 
 
 def looks_binary(text):
@@ -213,6 +246,10 @@ def check_b(base, head, pairs):
     violations, binary_skips, claims, deleted_headers = [], [], [], []
     for old_path, new_path, old_is_link, new_is_link in pairs:
         if both_ends_ignorable(old_path, new_path):
+            continue
+        # Excluded from the header logic only. The path is still enumerated, still
+        # deleted-or-not, and still reaches check_c. See NOTICE_FILE_RE.
+        if both_ends_notice_files(old_path, new_path):
             continue
         if all(VENDOR_RE.match(e) for e in (old_path, new_path) if e):
             continue
@@ -347,6 +384,12 @@ def check_a(base, head, modified, base_paths=None, gitlinks=()):
         # has no comment block to close. That blocks a pull request on a requirement
         # nothing can satisfy, which is how a gate loses its audience.
         if IGNORE_RE.match(p) or VENDOR_RE.match(p):
+            continue
+        # A record file's first line is a Markdown heading, not a licence header, and
+        # there is no comment block in Markdown for /auto-fix to close - so demanding a
+        # notice here is a requirement nothing can satisfy, on the one file the
+        # programme exists to have written. See NOTICE_FILE_RE.
+        if NOTICE_FILE_RE.search(p):
             continue
         # A submodule has no content in this repository, so there is nowhere to put a
         # notice and nothing to read. It is not silently dropped: check_c and check_d
