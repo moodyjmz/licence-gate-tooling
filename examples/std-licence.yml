@@ -2,8 +2,12 @@ name: Apply licence headers
 on:
   issue_comment:
     types: [created]
+# The action posts a patch as a comment; it never pushes. `contents: write` used to
+# be here and is deliberately gone: a bot push to the pull request branch makes the
+# bot the last pusher, which hands a self-approval to whoever pushed before it and
+# dismisses reviews already given. Do not put it back.
 permissions:
-  contents: write
+  contents: read
   pull-requests: write
 jobs:
   apply:

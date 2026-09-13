@@ -14,9 +14,10 @@ workflow checked out the pull request and ran the gate from that checkout — so
 pull request could edit the gate to report nothing, exit zero, and pass itself. No
 permissions and no cleverness required: change the file you are being judged by.
 
-The write-capable commands had the same shape with worse consequences. They hold
-`contents: write`, so a script the pull request supplied ran under the workflow
-token — an escalation from "can push a branch" to "can act as the workflow".
+The comment commands had the same shape with worse consequences: they held
+`contents: write` at the time, so a script the pull request supplied ran under the
+workflow token — an escalation from "can push a branch" to "can act as the workflow".
+They no longer hold it at all; see *No bot pushes to a pull request branch* below.
 
 Consumed as a pinned action, the code that runs is fixed at the pin. The pull
 request's *content* is read freely; that is the input. Its *code* is never executed.
@@ -44,8 +45,30 @@ security-critical thing in the estate. A tag is not immutable; it can be moved.
 |---|---|---|---|
 | `actions/gate` | `pull_request` | `contents: read`, `pull-requests: write` | Blocks on removed licence lines, missing modification notices, and new files needing a decision. Lists candidate replacement events. |
 | `actions/acknowledgement` | `pull_request`, `issue_comment` | `contents: read`, `pull-requests: read`, `statuses: write` | Requires a reviewer — not the author — to disposition every candidate, against the current head. |
-| `actions/auto-fix` | `issue_comment` | `contents: write`, `pull-requests: write` | Applies the modification notice to modified files. Mechanical; never touches new files. |
-| `actions/std-licence` | `issue_comment` | `contents: write`, `pull-requests: write` | Applies headers to new files on an explicit assertion of authorship. |
+| `actions/auto-fix` | `issue_comment` | `contents: read`, `pull-requests: write` | Works out the modification notice for modified files and posts it as a patch comment. Mechanical; never touches new files. |
+| `actions/std-licence` | `issue_comment` | `contents: read`, `pull-requests: write` | Works out headers for new files on an explicit assertion of authorship and posts them as a patch comment. |
+
+### No bot pushes to a pull request branch
+
+`auto-fix` and `std-licence` post a patch as a comment. The author applies it and
+pushes it themselves. Neither holds `contents: write`, and neither ever will.
+
+They used to push the change as `github-actions[bot]`, and that quietly defeated the
+protection the rest of this design rests on. Branch protection's
+`require_last_push_approval` exists so that whoever pushed last cannot be the one who
+approves. Put a bot push in between and it is satisfied by the wrong thing: a person
+with write access pushes a commit to somebody else's pull request, comments
+`/auto-fix`, the bot pushes on top — and that person is now free to approve the
+commit they wrote themselves. The record reads "approved by them at that sha", which
+is entirely true and worth nothing.
+
+The same push moves the head, so with `dismiss_stale_reviews` on, the tooling
+destroyed the approvals it had just collected.
+
+A patch the author applies is an ordinary push by an ordinary contributor, which
+every branch-protection rule then judges exactly as designed. There is no flag to
+restore the push: an unsafe path that is off by default is still an unsafe path, and
+this repository has been bitten three times by a safeguard that carried an exemption.
 
 ### The division that the whole design rests on
 
@@ -100,10 +123,12 @@ permissions, checkout, and the pinned `uses:`. Everything else is here.
 cd scripts && python3 -m unittest discover -p 'test_*.py'
 ```
 
-Two suites. `test_licence_map` covers the pure decisions; `test_gate_integration`
-drives the gate against real throwaway git repositories, because every defect found
-in the security audits lived in the git-interacting code and none were reachable from
-a pure-function test.
+`test_licence_map` covers the pure decisions. `test_gate_integration` drives the gate
+against real throwaway git repositories, because every defect found in the security
+audits lived in the git-interacting code and none were reachable from a pure-function
+test. `test_gate_action` and `test_patch_only_actions` extract the `run:` bodies out
+of the action definitions and execute them, because the controls written in YAML are
+the ones a pull request reaches first and nothing used to run them at all.
 
 Each test names the real failure it guards against — a test whose purpose is not
 obvious gets deleted in six months by someone who cannot see why it matters.
