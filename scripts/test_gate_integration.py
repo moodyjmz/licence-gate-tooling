@@ -404,13 +404,21 @@ class TestTheRegisterDoesNotBlockItself(GateCase):
                                  "a row naming a holder is a record, not a claim")
                 self.assertNotIn("missing a notice", report)
 
-    def test_editing_an_entry_naming_a_holder_is_not_a_finding(self):
+    def test_editing_an_entry_is_never_read_as_altering_a_licence(self):
+        """AMENDED, not weakened. This used to assert a clean exit; editing a recorded
+        row now blocks, because the register is append-only - see
+        TestTheRegisterIsAppendOnly. The guarantee it was written for is unchanged and
+        is what is still asserted: a row edit must not read as a LICENCE line being
+        altered or an ownership claim being made, because those carry remedies
+        ("restore the original line exactly") that make no sense for a table row. It
+        blocks for the true reason instead of the wrong one."""
         self.write("MODIFICATIONS.md", self.LOG)
         self.commit("base")
         self.write("MODIFICATIONS.md",
                    self.LOG.replace("| replaced |", "| replaced wholesale |"))
         self.commit("correct a row")
-        report = self.assertClean("correcting a row must not read as altering a licence")
+        report = self.assertBlocks("editing a recorded row blocks as an append violation")
+        self.assertIn("append-only", report)
         self.assertNotIn("removed or altered", report)
         self.assertNotIn("Ownership claimed", report)
 
@@ -419,8 +427,10 @@ class TestTheRegisterDoesNotBlockItself(GateCase):
         gate builds, so deleting the register is still an event a human must answer -
         which is what IGNORE_RE would have thrown away.
 
-        What this test can observe is that the path reaches the acknowledgement gate.
-        Append-only enforcement for these files is NOT built; see the class docstring."""
+        What this test observes is that the path reaches the acknowledgement gate.
+        Losing rows is separately enforced, and blocks - see
+        TestTheRegisterIsAppendOnly - but the two are independent: the register must
+        reach the reviewer's disposition list whether or not it lost anything."""
         self.write("MODIFICATIONS.md", self.LOG)
         self.write("src/a.js", "const a = 1;\n")
         self.commit("base")
@@ -1479,3 +1489,113 @@ class TestGitattributesCanHideTheDiffBeingSigned(GateCase):
         reason = self._reason(self.assertClean("a new attributes file must not block"))
         self.assertIn("linguist-generated", reason)
         self.assertIn("src/payroll.js", reason)
+
+
+class TestTheRegisterIsAppendOnly(GateCase):
+    """Nothing checked that EXISTING rows survived.
+
+    MODIFICATIONS.md and REPLACEMENTLOG.md are excluded from the header checks -
+    correctly, a Markdown heading is not a licence header - and the exclusion left them
+    with no content check of any kind. Deleting or rewriting historical entries raised
+    nothing at all, which for an append-only record is the whole ballgame: the register
+    is the artefact this programme exists to produce, and a row silently dropped is a
+    record nobody knows is missing.
+
+    THE NO-ATTACKER VERSION HAPPENS FIRST. Two pull requests both append rows; the
+    second hits a conflict, resolves it, and drops the first's rows. Nobody re-reads a
+    conflict resolution.
+
+    THIS BLOCKS. It is the one finding in the whole gate whose remedy is completely
+    mechanical - put the rows back - and unlike the vendored-bump deadlock no bot is
+    ever the author of a register edit.
+    """
+
+    LOG = ("# Modifications - licensed under the GNU AGPL v3\n"
+           "\n"
+           "| date | file | holder | what |\n"
+           "| --- | --- | --- | --- |\n"
+           "| 2026-01-02 | src/a.js | Example Corp | replaced |\n"
+           "| 2026-01-09 | src/b.js | Example Corp | replaced |\n")
+
+    def test_deleting_a_recorded_row_blocks(self):
+        self.write("MODIFICATIONS.md", self.LOG)
+        self.commit("base")
+        self.write("MODIFICATIONS.md",
+                   self.LOG.replace("| 2026-01-02 | src/a.js | Example Corp "
+                                    "| replaced |\n", ""))
+        self.commit("quietly drop a row")
+        report = self.assertBlocks("deleting a recorded row must block")
+        self.assertIn("append-only", report)
+        self.assertIn("MODIFICATIONS.md", report)
+
+    def test_a_conflict_resolution_that_loses_rows_blocks(self):
+        """The case with no attacker in it, which is the one that happens."""
+        self.write("REPLACEMENTLOG.md", self.LOG)
+        self.commit("base")
+        self.write("REPLACEMENTLOG.md",
+                   "# Modifications - licensed under the GNU AGPL v3\n"
+                   "\n"
+                   "| date | file | holder | what |\n"
+                   "| --- | --- | --- | --- |\n"
+                   "| 2026-02-01 | src/c.js | Example Corp | replaced |\n")
+        self.commit("resolve a conflict, badly")
+        self.assertIn("append-only",
+                      self.assertBlocks("a botched conflict resolution must block"))
+
+    def test_editing_an_existing_row_blocks_and_says_what_to_do_instead(self):
+        """The stated cost of this design: a legitimate typo fix in a recorded row is
+        blocked. The remedy has to be in the message, or the gate gets routed around."""
+        self.write("MODIFICATIONS.md", self.LOG)
+        self.commit("base")
+        self.write("MODIFICATIONS.md", self.LOG.replace("src/a.js", "src/aa.js"))
+        self.commit("fix a typo in a recorded row")
+        report = self.assertBlocks("rewriting a recorded row must block")
+        self.assertIn("append a new row", report.lower())
+        self.assertIn("anyone with write access", report.lower())
+
+    def test_deleting_the_register_outright_blocks(self):
+        self.write("MODIFICATIONS.md", self.LOG)
+        self.write("src/app.js", "const x = 1;\n")
+        self.commit("base")
+        os.remove(os.path.join(self.dir, "MODIFICATIONS.md"))
+        self.commit("remove the register")
+        self.assertIn("append-only",
+                      self.assertBlocks("deleting the register must block"))
+
+    def test_renaming_the_register_away_while_gutting_it_blocks(self):
+        """Same shape as both_ends_notice_files: testing one end would let a rename
+        launder the rewrite."""
+        self.write("MODIFICATIONS.md", self.LOG)
+        self.commit("base")
+        os.remove(os.path.join(self.dir, "MODIFICATIONS.md"))
+        self.write("OLDNOTES.md", "# Modifications\n\nnothing to see\n")
+        self.commit("rename the register and empty it")
+        self.assertIn("append-only",
+                      self.assertBlocks("renaming must not launder a rewrite"))
+
+    def test_appending_rows_is_still_clean(self):
+        self.write("MODIFICATIONS.md", self.LOG)
+        self.commit("base")
+        self.write("MODIFICATIONS.md", self.LOG +
+                   "| 2026-03-01 | src/c.js | Example Corp | replaced |\n")
+        self.commit("append a row")
+        report = self.assertClean("appending must stay clean")
+        self.assertNotIn("append-only", report)
+
+    def test_a_clean_append_is_certified_only_when_a_register_was_touched(self):
+        """The verified box may only carry claims this run established. A pull request
+        that never touched the register must not be told its rows survived."""
+        self.write("MODIFICATIONS.md", self.LOG)
+        self.write("src/app.js", "const x = 1;\n")
+        self.commit("base")
+        self.write("src/app.js", "const x = 2;\n")
+        self.commit("touch nothing else")
+        report = self.assertClean("an unrelated change is clean")
+        self.assertNotIn("every row already recorded", report)
+
+    def test_a_new_register_file_is_not_a_violation(self):
+        self._git("commit", "-q", "--allow-empty", "-m", "base")
+        self.write("MODIFICATIONS.md", self.LOG)
+        self.commit("start the register")
+        report = self.assertClean("creating the register must not block")
+        self.assertNotIn("append-only", report)

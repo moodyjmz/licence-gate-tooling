@@ -72,8 +72,10 @@ VENDOR_RE = re.compile(r"^(vendor/|vendors/|third[_-]party/|node_modules/|extern
 # check_c; they are excluded from the HEADER logic of checks A and B and from nothing
 # else.
 #
-# Append-only enforcement for these files is not built. Nothing here stops a row being
-# deleted; check_c raises the file, and a human reads it.
+# Append-only IS enforced, by check_g, and it blocks. The exclusion above removes these
+# paths from the HEADER logic and nothing else; without a content check of their own
+# that left them with no check at all, which for an append-only record is the whole
+# point of the record. See check_g for why it blocks rather than prompting.
 NOTICE_FILE_RE = re.compile(r"(^|/)(MODIFICATIONS|REPLACEMENTLOG)\.md$", re.I)
 # Text that is not licensed material in its own right and is not a replaceable asset.
 TEXT_RE = re.compile(r"\.(md|txt|json|ya?ml|toml|ini|cfg|lock)$|^[^.]+$", re.I)
@@ -680,6 +682,75 @@ def check_f(base, head, pairs):
     return findings
 
 
+def check_g(base, head, pairs):
+    """The register files are append-only. Returns [(path, reason)]. BLOCKS.
+
+    The base blob's content must be a PREFIX of the head blob's, byte for byte. Rows
+    may be added beneath what is already there; nothing already recorded may move,
+    change or disappear.
+
+    WHY THERE WAS NOTHING HERE BEFORE. MODIFICATIONS.md and REPLACEMENTLOG.md were
+    excluded from checks A and B because a Markdown heading reads as a licence header
+    and rows naming a holder read as ownership claims - correct, and it left the two
+    files this programme exists to write with no content check of any kind. Deleting
+    historical entries raised nothing. check_c raising the path said "this file
+    changed", which is true of every pull request that records anything.
+
+    THIS BLOCKS, and that is a decision. Three reasons, in order of weight:
+      * the remedy is completely mechanical - put the rows back - unlike "restore the
+        licence line" on a vendored bump, which nobody could carry out;
+      * no bot is ever the author of a register edit, so there is no deadlock to walk
+        into;
+      * the register is the artefact. A candidate a reviewer waves through is exactly
+        how a row goes missing, and a missing row is a record nobody knows is missing.
+
+    THE COST, stated rather than discovered later: a legitimate typo fix in an existing
+    row is blocked. That is deliberate - an append-only record whose rows can be edited
+    is not one - and the message says what to do instead, because a gate that blocks
+    without a remedy is a gate people route around.
+
+    A SECOND COST, less obvious: `base` is the merge-base, so a row edited ON THE BASE
+    BRANCH and merged into this one arrives as this pull request's change. The remedy
+    still works, but nobody should be surprised by it.
+
+    EITHER END, not both. `both_ends_notice_files` exists to stop a rename laundering a
+    header rewrite, and the mirror image applies here: renaming the register away in
+    the commit that guts it must not buy an exemption from the check that would have
+    caught it. IGNORE_RE is deliberately NOT consulted - a register under docs/ is
+    still the register.
+    """
+    violations = []
+    for old_path, new_path, old_is_link, new_is_link in pairs:
+        ends = [p for p in (old_path, new_path) if p]
+        if not any(NOTICE_FILE_RE.search(p) for p in ends):
+            continue
+        # Nothing was here to preserve: the register being created, or a submodule
+        # pointer whose content has never lived in this repository.
+        if old_path is None or old_is_link:
+            continue
+        before = read_at(base, old_path, "the base version of")
+        after = _blob_or_empty(head, new_path, new_is_link, "the modified file")
+        if after.startswith(before):
+            continue
+        b_lines, a_lines = before.split("\n"), after.split("\n")
+        common = 0
+        while (common < len(b_lines) and common < len(a_lines)
+               and b_lines[common] == a_lines[common]):
+            common += 1
+        lost = len(b_lines) - common
+        # Reported as a DIVERGENCE POINT, not as a row count. Everything after the
+        # first mismatch is unverifiable, not necessarily deleted - a one-word edit to
+        # the first of ten rows makes the other nine unmatched too. Saying "10 rows
+        # lost" about that would be false, and a finding a reader can disprove in
+        # seconds is a finding they stop believing.
+        violations.append((old_path,
+                           "the register is append-only, and line {} no longer matches "
+                           "what was already recorded there ({} recorded line(s) from "
+                           "that point on are changed, reordered or missing)"
+                           .format(common + 1, lost)))
+    return violations
+
+
 def _add_reason(cands, path, why):
     """Add a candidate, MERGING into any entry this path already has.
 
@@ -954,9 +1025,10 @@ def main(argv, author=None):
                 declarations=check_e(base, head, pairs),
                 attributes=check_f(base, head, pairs))
     d_src, d_assets, d_links = check_d(head, added, gitlinks)
+    g = check_g(base, head, pairs)
 
     out = []
-    blocking = bool(a or b or d_src)
+    blocking = bool(a or b or d_src or g)
 
     # WHAT DO I DO NOW. This block exists because the report failed the only test that
     # matters: the person who built the gate opened a pull request, read the report,
@@ -977,6 +1049,11 @@ def main(argv, author=None):
     # A gate that cannot say what to do next is a gate people route around, and being
     # routed around looks identical to working.
     todo = []
+    if g:
+        todo.append(("anyone with write access, the author included",
+                     "put back the {} the register lost — restore the rows exactly as "
+                     "they were and add any new ones beneath them".format(
+                         "row" if len(g) == 1 else "rows")))
     if b:
         todo.append(("anyone with write access",
                      "restore the {} this pull request removed or altered — by hand; "
@@ -1015,6 +1092,24 @@ def main(argv, author=None):
     else:
         out.append("### Nothing to do — both checks pass\n")
         out.append("Anything below is for information and does not block the merge.\n")
+
+    if g:
+        out.append(f"### Blocking — the register lost rows ({len(g)} file(s))\n")
+        out.append("`MODIFICATIONS.md` and `REPLACEMENTLOG.md` are **append-only**. They "
+                   "are the record this whole programme exists to produce, and a row "
+                   "that quietly disappears is a record nobody knows is missing. The "
+                   "commonest cause is not malice: two pull requests both append, the "
+                   "second hits a conflict, and the resolution drops the first's "
+                   "rows.\n")
+        out.append("**How to resolve:** restore the previous content exactly, then add "
+                   "your new rows beneath it. Anyone with write access can do this, the "
+                   "author included — it is a mechanical fix, not a judgement.\n")
+        out.append("**If a recorded row is genuinely wrong, do not edit it.** Append a "
+                   "new row that corrects it and names the row it corrects. A register "
+                   "whose history can be rewritten is not a register.\n")
+        for p, why in g:
+            out.append(f"- `{p}` — {why}")
+        out.append("")
 
     if b:
         out.append(f"### Blocking — {len(b)} licence line(s) removed or altered\n")
@@ -1158,6 +1253,14 @@ def main(argv, author=None):
             .format(", ".join(caveats)))
     if not a:
         verified.append("every modified file with a header carries a notice")
+    # Only where a register was actually in this diff. Telling a pull request that
+    # never touched one that its rows survived is a claim about a file this run never
+    # read - the shape of false all-clear the verified box exists to avoid.
+    if not g and any(NOTICE_FILE_RE.search(p)
+                     for p in list(added) + list(modified) + list(deleted)
+                     + [x for pair in renamed for x in pair]):
+        verified.append("every row already recorded in the register is still there, "
+                        "unchanged")
     if verified:
         out.append("<details><summary>✅ Verified automatically — you need not check these</summary>\n")
         for v in verified:
