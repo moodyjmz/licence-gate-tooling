@@ -110,7 +110,15 @@ const summary = {
   addCodeBlock: (t) => { result.summary += t; return summary; },
   addTable: () => summary,
   addSeparator: () => summary,
-  write: async () => summary,
+  // A step summary is capped at 1 MiB, and the write rejects over it. A stub that
+  // always resolved would let an unguarded summary write throw the step away on the
+  // very widest report - the same failure, moved to a higher threshold.
+  write: async () => {
+    if (result.summary.length > 1024 * 1024) {
+      throw new Error('Summary exceeds the 1024k character limit');
+    }
+    return summary;
+  },
 };
 
 const core = {
@@ -414,6 +422,25 @@ class TestTheGateNeverPostsSomethingItHasNotEarned(ScriptStepCase):
         self.assertIn("actions/runs/4242", result["posted"][0])
         self.assertIn("path-3999", result["summary"],
                       "the body points at a step summary that does not hold the report")
+
+    def test_a_report_too_large_even_for_the_step_summary_still_gets_a_comment(self):
+        """The step summary is capped too, at 1 MiB, and the write rejects over it.
+
+        Falling over there would throw the comment away at a higher threshold - the
+        same defect, further out. The run log still has the report, because the step
+        that produced it cats it.
+        """
+        report = self.big_report(14000)
+        self.assertGreater(len(report), 1024 * 1024, "the fixture is not over the cap")
+        self.write_report(report)
+        result = self.run_step(HEAD_SHA="a" * 40)
+        self.assertIsNone(result["threw"])
+        self.assertEqual(len(result["posted"]), 1)
+        self.assertLess(len(result["posted"][0]), 65536)
+        self.assertIn("Blocking — 14000 licence line(s) removed or altered",
+                      result["posted"][0])
+        self.assertNotIn("step summary", result["posted"][0],
+                         "the comment points at a summary the report never reached")
 
     def test_an_oversized_report_keeps_the_marker(self):
         """Without it the next push cannot find this comment and posts another."""

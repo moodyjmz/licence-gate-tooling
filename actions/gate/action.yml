@@ -155,10 +155,23 @@ runs:
           let text = wrap(body);
           if (text.length > LIMIT) {
             // The full report goes to the step summary FIRST, so the pointer below is
-            // a fact rather than a hope.
-            await core.summary.addRaw(body).write();
+            // a fact rather than a hope. The summary is capped as well, at 1 MiB, and
+            // the write rejects over it - unguarded that throws the comment away at a
+            // higher threshold, which is this same failure moved rather than fixed.
+            // The step that produced the report cats it, so the run log has it either
+            // way; only the summary half of the pointer is conditional.
+            let inSummary = true;
+            try {
+              await core.summary.addRaw(body).write();
+            } catch (e) {
+              inSummary = false;
+              core.warning(`The full report did not fit in the step summary either: ${e.message}`);
+            }
             const runUrl =
               `${context.serverUrl}/${owner}/${repo}/actions/runs/${context.runId}`;
+            const where = inSummary
+              ? `[step summary and run log](${runUrl})`
+              : `[run log](${runUrl})`;
             // Truncating the report here would reproduce exactly the failure the patch
             // comment refuses: a body cut off at the cap reads as complete. So the
             // degraded comment is a DIFFERENT document - the headings, which carry the
@@ -176,7 +189,7 @@ runs:
               const out = [
                 `**This report is ${body.length} characters and does not fit in a ` +
                 `comment.** Nothing was dropped from the checks - only from this ` +
-                `comment. The full report is in the [step summary and run log](${runUrl}).`,
+                `comment. The full report is in the ${where}.`,
                 '',
               ];
               if (todo.length) {

@@ -542,8 +542,21 @@ def check_a(base, head, modified, base_paths=None, gitlinks=()):
         # name it had there.
         before = read_at(base, (base_paths or {}).get(p, p), "the base version of")
         had_header = has_licence_header(leading_comment_region(before))
-        has_header_now = has_licence_header(leading_comment_region(content))
-        if (had_header or has_header_now) and NOTICE not in content:
+        region_now = leading_comment_region(content)
+        has_header_now = has_licence_header(region_now)
+        # THE NOTICE IS LOOKED FOR IN THE REGION, NOT THE FILE. Membership over the
+        # whole blob was satisfied by the string appearing anywhere: inside a literal,
+        # in a test fixture, in a vendored bundle far below. check_b already asks this
+        # as a separate question because prominence is positional - a licence line
+        # demoted from the header into a template string has lost its prominence and
+        # every one of its bytes - and the notice this check exists to demand is
+        # subject to the same rule. Whole-file membership cannot express it.
+        #
+        # NOT A NARROWING: the region is the same `leading_comment_region` check_b and
+        # apply_fix use, and it is where apply_fix puts the notice, so the remedy the
+        # report offers still satisfies the check. A notice the region cannot see is
+        # one a reader at the top of the file cannot see either.
+        if (had_header or has_header_now) and NOTICE not in region_now:
             missing.append(p)
     return missing
 
@@ -974,7 +987,13 @@ def apply_fix(head, paths):
         except (OSError, UnicodeDecodeError):
             unfixable.append(p)
             continue
-        if NOTICE in content:
+        # The SAME question check_a asks, of the same region. This tested the whole
+        # file, so a stray notice below the header block - which check_a blocks on,
+        # because prominence is positional - looked to the remedy like a file already
+        # done. It wrote nothing and reported success, and the pull request the gate
+        # had blocked had no way out. A remedy and the check that names it have to
+        # agree on what "already has a notice" means.
+        if NOTICE in leading_comment_region(content):
             continue
         lines = content.split("\n")
         # The anchor must be IN the leading comment region. The old search ran over

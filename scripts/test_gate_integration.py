@@ -20,6 +20,11 @@ import subprocess
 import tempfile
 import unittest
 
+# The one definition of the region, asked here too. A test that walked its own idea of
+# "the leading comment block" would be a fourth implementation of it, and three
+# disagreeing ones is what made a file invisible to every check once already.
+from licence_map import leading_comment_region
+
 GATE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "licence-gate.py")
 STD_LICENCE = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                            "apply-std-licence.py")
@@ -1880,3 +1885,120 @@ class TestARefusalSaysSomethingTrue(GateCase):
         self.commit("add an already-headered file")
         out = self._stamp("src/b.js")
         self.assertIn("already carries a header", out)
+
+
+class TestTheNoticeHasToBeWhereItMeansSomething(GateCase):
+    """check_a asked "is the notice present in the file", over the whole blob.
+
+    check_b already grew a second question about exactly this distinction, because
+    prominence is positional: a notice that has been moved into a string literal, a
+    test fixture or a vendored bundle is not a notice, however many of its bytes
+    survive. check_a was left asking the weaker question, so a substring anywhere in
+    the file satisfied the one check that demands the notice be there at all.
+
+    The region is `licence_map.leading_comment_region` - the definition check_b and
+    the fix applier already use, imported, not re-derived here."""
+
+    NOTICE = "Modified by the Example project."
+    HEADER = "// Copyright (c) 2020 Example Corp\n// Licensed under the Example License 1.0\n"
+
+    def _fix(self):
+        return subprocess.run(["python3", GATE, "--fix", "HEAD~1", "HEAD"],
+                              cwd=self.dir, capture_output=True, text=True)
+
+    def test_a_notice_in_a_string_literal_does_not_count(self):
+        """The whole-file test is satisfied by program data. This is the same shape
+        check_b blocks in the other direction - a header line demoted out of the
+        comment block into a template string - and it passed here."""
+        body = 'const banner = "{}";\n'.format(self.NOTICE)
+        self.write("src/a.js", self.HEADER + body + "const x = 1;\n")
+        self.commit("base")
+        self.write("src/a.js", self.HEADER + body + "const x = 2;\n")
+        self.commit("edit a licensed file")
+        report = self.assertBlocks("a notice in a string literal is program data")
+        self.assertIn("src/a.js", report)
+
+    def test_a_notice_in_a_test_fixture_line_does_not_count_either(self):
+        """Same question, a shape that turns up more often: the string sits in a
+        fixture far below the header, where nobody reading the top of the file would
+        ever see it."""
+        self.write("src/t.js", self.HEADER + "const x = 1;\n")
+        self.commit("base")
+        self.write("src/t.js", self.HEADER + "const x = 2;\n"
+                   + "// a comment much further down\n"
+                   + "const fixture = ['{}'];\n".format(self.NOTICE))
+        self.commit("edit and add a fixture quoting the notice")
+        self.assertBlocks("a notice below the header block is not prominent")
+
+    def test_a_notice_in_the_header_block_is_what_passes(self):
+        """The control, and the thing that must not become harder: a notice where the
+        tool itself puts one satisfies the check."""
+        headered = self.HEADER + "// {}\n".format(self.NOTICE)
+        self.write("src/b.js", headered + "const x = 1;\n")
+        self.commit("base")
+        self.write("src/b.js", headered + "const x = 2;\n")
+        self.commit("edit")
+        self.assertClean("a notice in the leading comment block is a notice")
+
+    def test_what_the_fix_writes_is_what_the_gate_accepts(self):
+        """THE LOOP HAS TO CLOSE. The gate blocks, tells the reviewer to run
+        /auto-fix, and if what /auto-fix writes does not satisfy the tightened check
+        the same pull request blocks again with no way out. Block, fix, commit,
+        re-gate."""
+        self.write("src/c.js", self.HEADER + "const x = 1;\n")
+        self.commit("base")
+        self.write("src/c.js", self.HEADER + "const x = 2;\n")
+        self.commit("edit")
+        self.assertBlocks("an edited licensed file needs a notice")
+        p = self._fix()
+        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+        self.commit("apply the notice")
+        code, report = self.run_gate()
+        self.assertEqual(code, 0,
+                         "the gate must accept the notice its own remedy wrote\n"
+                         f"--- gate said ---\n{report}")
+
+    def test_a_block_comment_fix_is_accepted_too(self):
+        """The other comment shape the fix applier handles: inserted before the `*/`
+        rather than appended to a run of line comments."""
+        self.write("src/d.js", LICENSED + "const x = 1;\n")
+        self.commit("base")
+        self.write("src/d.js", LICENSED + "const x = 2;\n")
+        self.commit("edit")
+        self.assertBlocks("an edited licensed file needs a notice")
+        p = self._fix()
+        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+        self.commit("apply the notice")
+        code, report = self.run_gate()
+        self.assertEqual(code, 0,
+                         "the gate must accept the notice its own remedy wrote\n"
+                         f"--- gate said ---\n{report}")
+
+    def test_a_notice_outside_the_region_is_still_remediable(self):
+        """THE OTHER HALF OF THE TIGHTENING, and it does not come free. Asking the
+        region rather than the file makes a stray notice below the header block start
+        blocking - correctly - but the fix applier's own early-out asked the weaker
+        question, so it saw the string in the file, decided there was nothing to do,
+        and reported success. The gate blocked, the remedy it names wrote nothing, and
+        the pull request had no way out.
+
+        Both must ask the same question of the same region, or the tightening builds a
+        requirement nothing can satisfy."""
+        header = "# Copyright (c) 2020 Example Corp\n# Licensed under the Example License 1.0\n"
+        stray = header + "k = 1\n# {}\n".format(self.NOTICE)
+        self.write("src/e.py", stray)
+        self.commit("base")
+        self.write("src/e.py", stray + "k = 2\n")
+        self.commit("edit")
+        self.assertBlocks("a notice below the first line of code is not prominent")
+        p = self._fix()
+        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+        with open(os.path.join(self.dir, "src/e.py"), encoding="utf-8") as fh:
+            fixed = fh.read()
+        self.assertIn("# {}".format(self.NOTICE),
+                      leading_comment_region(fixed),
+                      "the remedy must put a notice where the check looks for one\n"
+                      f"--- file is now ---\n{fixed}")
+        self.commit("apply the notice")
+        code, report = self.run_gate()
+        self.assertEqual(code, 0, f"the loop must close\n--- gate said ---\n{report}")
