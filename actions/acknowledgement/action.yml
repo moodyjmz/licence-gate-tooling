@@ -62,11 +62,12 @@ runs:
         # more carefully, would have turned that accident into a false all-clear on a
         # pull request nothing had examined.
         set +e
+        tmp="${RUNNER_TEMP:-/tmp}"
         python3 "${GITHUB_ACTION_PATH}/../../scripts/licence-gate.py" --candidates \
-          "$BASE_SHA" "$HEAD_SHA" > /tmp/candidates.txt 2> /tmp/candidates.err
+          "$BASE_SHA" "$HEAD_SHA" > "${tmp}/candidates.txt" 2> "${tmp}/candidates.err"
         rc=$?
-        cat /tmp/candidates.txt
-        cat /tmp/candidates.err >&2
+        cat "${tmp}/candidates.txt"
+        cat "${tmp}/candidates.err" >&2
         if [ "$rc" != "0" ]; then
           echo "could-not-run=true" >> "$GITHUB_OUTPUT"
         fi
@@ -97,7 +98,8 @@ runs:
             .replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
           const shapeRe = new RegExp(`^\\s*${prefix}`, 'mi');
 
-          const candidates = fs.readFileSync('/tmp/candidates.txt', 'utf8')
+          const candidates = fs
+            .readFileSync(`${process.env.RUNNER_TEMP || '/tmp'}/candidates.txt`, 'utf8')
             .split('\n').map(s => s.trim()).filter(Boolean);
 
           const setStatus = async (state, description) => {

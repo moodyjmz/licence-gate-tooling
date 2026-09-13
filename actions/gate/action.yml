@@ -104,10 +104,11 @@ runs:
         AUTHOR: ${{ inputs.author }}
       run: |
         set +e
+        report="${RUNNER_TEMP:-/tmp}/licence-gate-report.md"
         python3 "${GITHUB_ACTION_PATH}/../../scripts/licence-gate.py" \
-          --author="$AUTHOR" "$BASE_SHA" "$HEAD_SHA" > /tmp/licence-gate-report.md
+          --author="$AUTHOR" "$BASE_SHA" "$HEAD_SHA" > "$report"
         echo "exit=$?" >> "$GITHUB_OUTPUT"
-        cat /tmp/licence-gate-report.md
+        cat "$report"
 
     - name: Post or update the review comment
       uses: actions/github-script@v7
@@ -117,7 +118,9 @@ runs:
         github-token: ${{ inputs.token }}
         script: |
           const fs = require('fs');
-          const body = fs.readFileSync('/tmp/licence-gate-report.md', 'utf8');
+          const reportPath =
+            `${process.env.RUNNER_TEMP || '/tmp'}/licence-gate-report.md`;
+          const body = fs.readFileSync(reportPath, 'utf8');
           const marker = '<!-- licence-gate -->';
           const sha = process.env.HEAD_SHA;
           const text = `${marker}\n## Licence gate\n\n${body}\n\n---\n<sub>Evaluated at \`${sha.substring(0,9)}\`. A disposition made against an earlier commit does not carry over.</sub>`;

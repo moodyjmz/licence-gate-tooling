@@ -103,16 +103,17 @@ runs:
         BASE_SHA: ${{ steps.auth.outputs.base_sha }}
       run: |
         set +e
+        tmp="${RUNNER_TEMP:-/tmp}"
         python3 "${GITHUB_ACTION_PATH}/../../scripts/licence-gate.py" --fix \
-          "$BASE_SHA" HEAD > /tmp/fixed.txt 2> /tmp/unfixable.txt
+          "$BASE_SHA" HEAD > "${tmp}/fixed.txt" 2> "${tmp}/unfixable.txt"
         rc=$?
-        cat /tmp/fixed.txt
-        cat /tmp/unfixable.txt >&2
+        cat "${tmp}/fixed.txt"
+        cat "${tmp}/unfixable.txt" >&2
         # Exit 3 means some file could not be fixed. Reporting "nothing to auto-fix"
         # about a file the gate is actively blocking on is the failure to avoid here.
         if [ "$rc" != "0" ] && [ "$rc" != "3" ]; then exit "$rc"; fi
-        echo "count=$(wc -l < /tmp/fixed.txt | tr -d ' ')" >> "$GITHUB_OUTPUT"
-        echo "unfixable=$(wc -l < /tmp/unfixable.txt | tr -d ' ')" >> "$GITHUB_OUTPUT"
+        echo "count=$(wc -l < "${tmp}/fixed.txt" | tr -d ' ')" >> "$GITHUB_OUTPUT"
+        echo "unfixable=$(wc -l < "${tmp}/unfixable.txt" | tr -d ' ')" >> "$GITHUB_OUTPUT"
 
     # NOTHING IS PUSHED. The patch is posted for the author to apply.
     #

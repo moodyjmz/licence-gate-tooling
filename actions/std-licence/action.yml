@@ -54,7 +54,9 @@ runs:
           const body = context.payload.comment.body || '';
           const line = body.split('\n').find(l => l.includes('/std-licence')) || '';
           const paths = line.replace('/std-licence','').trim().split(/\s+/).filter(Boolean);
-          fs.writeFileSync('/tmp/explicit-paths.txt', paths.join('\n'));
+          fs.writeFileSync(
+            `${process.env.RUNNER_TEMP || '/tmp'}/explicit-paths.txt`,
+            paths.join('\n'));
           const pr = await github.rest.pulls.get(
             {owner, repo, pull_number: context.issue.number});
           core.setOutput('ok',
@@ -100,9 +102,25 @@ runs:
       env:
         BASE_SHA: ${{ steps.ctx.outputs.base_sha }}
       run: |
-        report="${RUNNER_TEMP:-/tmp}/report.md"
+        tmp="${RUNNER_TEMP:-/tmp}"
+        report="${tmp}/report.md"
+        asserted_paths="${tmp}/explicit-paths.txt"
+        # The asserted paths reach the script as argv, read from the file the step
+        # above wrote. Comment text still never becomes shell input: each line is read
+        # whole and passed quoted, so no word splitting, globbing or expansion happens
+        # to it on the way.
+        if [ ! -f "$asserted_paths" ]; then
+          echo "The asserted paths were never written, so the step before this one did" >&2
+          echo "not complete. Refusing: a command that asserts authorship over nothing" >&2
+          echo "is not the same as one that found nothing to do." >&2
+          exit 1
+        fi
+        paths=()
+        while IFS= read -r asserted; do
+          if [ -n "$asserted" ]; then paths+=("$asserted"); fi
+        done < "$asserted_paths"
         python3 "${GITHUB_ACTION_PATH}/../../scripts/apply-std-licence.py" \
-          "$BASE_SHA" HEAD > "$report"
+          "$BASE_SHA" HEAD ${paths[@]+"${paths[@]}"} > "$report"
         cat "$report"
 
     # NOTHING IS PUSHED. The headers are posted as a patch for the author to apply.
