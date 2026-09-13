@@ -18,8 +18,9 @@ import re
 import sys
 
 from git_io import GateError, changed_files, git_show, merge_base, sh_strict
-from licence_map import (SOURCE_RE, has_licence_header, leading_comment_lines,
-                         leading_comment_region)
+from licence_map import (SOURCE_RE, declaration_kind, has_licence_header,
+                         leading_comment_lines, leading_comment_region,
+                         licence_declaration)
 
 NOTICE = "Modified by the Example project."
 
@@ -422,6 +423,74 @@ def read_at(rev, path, what):
     return content
 
 
+def _declared_at(rev, path, is_link, what):
+    """The structured declaration at one END of a change, or None if there isn't one.
+
+    END-BY-END, exactly as check_b does it, and for the same reason: `git show` cannot
+    produce a blob for a gitlink, so reading both ends unconditionally would turn an
+    ordinary submodule bump into "could not read the modified file" and block the gate
+    on a file that is not a file. A missing path is an addition or a deletion, not a
+    failure.
+    """
+    if path is None or is_link or declaration_kind(path) is None:
+        return None
+    return licence_declaration(path, read_at(rev, path, what))
+
+
+def _fmt_declaration(values):
+    return " ".join(f"`{v}`" for v in values) if values else "(no licence field)"
+
+
+def check_e(base, head, pairs):
+    """Changes to a structured licence declaration. Returns [(path, reason)].
+
+    CANDIDATES, NEVER BLOCKING, and that is a decision rather than an oversight. The
+    field is legitimately edited - a package.json is rewritten by every dependency
+    bump, and relicensing genuinely happens - so the question is always "was this
+    meant?", which only a person answers. Blocking a bot that cannot answer is the
+    deadlock VENDOR_RE already exists to avoid.
+
+    THE TWO CASES ARE NOT THE SAME and are not reported the same way. A declaration
+    file merely being TOUCHED raises nothing: the licence field is intact, and this
+    check established that rather than assuming it. The licence field ITSELF changing
+    value raises a candidate naming both values, because that is the event - a
+    relicensing of everything the build ships.
+
+    A FORMAT THAT COULD NOT BE PARSED IS A THIRD CASE, and it raises a candidate too.
+    "No licence field changed" and "this file could not be read as JSON" are not the
+    same answer, and letting them share a code path is the failure this whole
+    programme keeps finding in itself.
+    """
+    findings = []
+    for old_path, new_path, old_is_link, new_is_link in pairs:
+        if both_ends_ignorable(old_path, new_path):
+            continue
+        before = _declared_at(base, old_path, old_is_link, "the base version of")
+        after = _declared_at(head, new_path, new_is_link, "the modified file")
+        if before is None and after is None:
+            continue
+        path = new_path or old_path
+        if (before is not None and not before.parsed) or \
+           (after is not None and not after.parsed):
+            findings.append((path,
+                             "declares its licence in a structured field, and this run "
+                             "could not parse the file — so whether the licence changed "
+                             "is UNKNOWN, not unchanged. A reviewer other than the "
+                             "author must read the file and say"))
+            continue
+        was = before.values if before is not None else ()
+        now = after.values if after is not None else ()
+        if was == now:
+            continue
+        findings.append((path,
+                         "the structured licence declaration changed: {} → {}. This is "
+                         "the licence the built artefact carries (.deb, .rpm, the npm "
+                         "package), not a source header. A reviewer other than the "
+                         "author must confirm the change was intended and recorded"
+                         .format(_fmt_declaration(was), _fmt_declaration(now))))
+    return findings
+
+
 def check_a(base, head, modified, base_paths=None, gitlinks=()):
     """Modified files that have a licence header but no notice.
 
@@ -513,9 +582,34 @@ def check_d(head, added, gitlinks=()):
     return needing, assets, links
 
 
+def _add_reason(cands, path, why):
+    """Add a candidate, MERGING into any entry this path already has.
+
+    Not tidiness. The disposition block prints one `path -> ` line per candidate and
+    the reviewer answers each; the same path twice asks them to answer it twice and
+    gives the acknowledgement gate two keys for one file. Appending to the existing
+    reason keeps the specific finding visible - `.gitattributes` raises a bland "asset
+    modified" already, and "asset modified" is not what the reviewer needs to be told.
+    """
+    for i, (p, existing) in enumerate(cands):
+        if p == path:
+            if why not in existing:
+                cands[i] = (p, existing + "; " + why)
+            return
+    cands.append((path, why))
+
+
 def check_c(added, modified, deleted, renamed, gitlinks=(), binary_skips=(),
-            claims=()):
-    """Candidate replacement events. Over-detects by design."""
+            claims=(), *, declarations):
+    """Candidate replacement events. Over-detects by design.
+
+    `declarations` is KEYWORD-ONLY AND HAS NO DEFAULT, deliberately. There are two
+    call sites - the report and `--candidates`, which is what the acknowledgement gate
+    reads - and a default would let one of them silently stop requiring answers for
+    licence-field changes while the other kept requiring them. A defaulted parameter
+    is how the two source patterns diverged in the first place; a TypeError is how a
+    forgotten call site announces itself.
+    """
     cands = []
     for old, new in renamed:
         cands.append((old, f"renamed to `{new}` - the commonest shape of a replacement"))
@@ -574,6 +668,10 @@ def check_c(added, modified, deleted, renamed, gitlinks=(), binary_skips=(),
         if p not in seen:
             cands.append((p, "binary content changed - no line-level check is possible, "
                              "so the whole asset needs your decision"))
+    # Merged rather than appended: a declaration file may already be here as a deleted
+    # path or an asset, and the specific reason is the one worth reading.
+    for path, why in declarations:
+        _add_reason(cands, path, why)
     return cands
 
 
@@ -735,7 +833,8 @@ def main(argv, author=None):
     if candidates_only:
         _, binary_skips, claims, _deleted_headers = check_b(base, head, pairs)
         for p, _ in check_c(added, modified, deleted, renamed, gitlinks,
-                            binary_skips, claims):
+                            binary_skips, claims,
+                            declarations=check_e(base, head, pairs)):
             print(p)
         return 0
 
@@ -752,7 +851,8 @@ def main(argv, author=None):
 
     b, binary_skips, claims, deleted_headers = check_b(base, head, pairs)
     a = check_a(base, head, modified_for_a, base_paths, gitlinks)
-    c = check_c(added, modified, deleted, renamed, gitlinks, binary_skips, claims)
+    c = check_c(added, modified, deleted, renamed, gitlinks, binary_skips, claims,
+                declarations=check_e(base, head, pairs))
     d_src, d_assets, d_links = check_d(head, added, gitlinks)
 
     out = []

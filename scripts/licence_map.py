@@ -18,6 +18,7 @@ re-examines it.
 """
 
 import collections
+import json
 import re
 
 DEFAULT_LICENCE = "Example-1.0"
@@ -209,6 +210,92 @@ def has_licence_header(text):
     """Whether this text asserts ownership. The single predicate; do not re-derive it."""
     text = text or ""
     return bool(HEADER_RE.search(text) or NAMED_COPYRIGHT_RE.search(text))
+
+
+# A STRUCTURED LICENCE DECLARATION: the licence as a FIELD, not as a header comment.
+#
+# HEADER_RE above is a prose matcher and requires a colon. None of these forms have
+# one in the right place, so every one of them was seen by nothing at all:
+#
+#   package.json / composer.json   "license": "AGPL-3.0"
+#   Cargo.toml / pyproject.toml    license = "AGPL-3.0"
+#   REUSE.toml                     SPDX-License-Identifier = "AGPL-3.0-or-later"
+#   debian/copyright, .reuse/dep5  License: AGPL-3   /   Copyright: 2020 Example Corp
+#   *.spec (RPM)                   License: AGPLv3
+#
+# These are the declarations the SHIPPED ARTEFACTS carry. The header in a .php file
+# does not go in the .deb's metadata, the .rpm's metadata or the npm registry entry -
+# this field does. Changing `"license"` from AGPL-3.0 to MIT relicensed everything the
+# build produces and the gate reported that no licence line had been altered.
+#
+# WIDENING HEADER_RE TO COVER THEM WOULD BE THE NEXT DEFECT. It is a pattern tuned
+# against a corpus of prose and real header styles, and a package.json is neither; the
+# `"type"` key of an npm `licenses` array would start matching documentation. So each
+# format is read on its own terms, here, in a function with its own name.
+#
+# JSON IS PARSED RATHER THAN PATTERN-MATCHED, because it can be. A `"license"` value
+# is a string in most package.json files and an object or an array in the rest, and a
+# line-anchored regex sees the key and not the value it moved to. TOML is matched,
+# because tomllib is 3.11 and this has to run on what the runner has.
+_DECLARATION_KINDS = (
+    ("json", re.compile(r"(^|/)(package|composer)\.json$", re.I)),
+    ("toml", re.compile(r"(^|/)(Cargo|pyproject|REUSE)\.toml$", re.I)),
+    ("deb", re.compile(r"(^|/)(debian/copyright|\.reuse/dep5)$", re.I)),
+    ("rpm", re.compile(r"\.spec$", re.I)),
+)
+
+# Anchored at the start of a line, and narrow. `licence`/`license` both spelt, because
+# the projects that get this wrong are the ones that spell it the other way.
+_DECLARATION_FIELDS = {
+    "toml": re.compile(
+        r"^[ \t]*(?:licen[sc]e(?:[-_][a-z]+)?|SPDX-License-Identifier)[ \t]*=.*$",
+        re.I | re.M),
+    "deb": re.compile(r"^(?:License|Copyright)[ \t]*:.*$", re.I | re.M),
+    "rpm": re.compile(r"^(?:License|Copyright)[ \t]*:.*$", re.I | re.M),
+}
+
+_JSON_LICENCE_KEYS = ("license", "licenses", "licence", "licences")
+
+# `parsed` is False when the format could not be read at all. That is NOT the same as
+# "no licence declared", and the caller must not treat it as one: a package.json this
+# tool cannot parse is a package.json whose licence field this tool did not check.
+DeclaredLicence = collections.namedtuple("DeclaredLicence", "values parsed")
+
+
+def declaration_kind(path):
+    """Which structured format this path's licence is declared in, or None."""
+    for kind, pattern in _DECLARATION_KINDS:
+        if pattern.search(path):
+            return kind
+    return None
+
+
+def licence_declaration(path, content):
+    """The licence-bearing fields of a structured declaration file.
+
+    Returns None when the path is not one, otherwise a DeclaredLicence whose `values`
+    are compared across the two ends of a change. Comparison is on the extracted
+    fields ONLY, so a dependency bump - which rewrites most of a package.json and
+    leaves the licence alone - produces no finding at all. That silence is the point:
+    a candidate on every bump is the deadlock the gate has already paid for once.
+    """
+    kind = declaration_kind(path)
+    if kind is None:
+        return None
+    content = content or ""
+    if kind == "json":
+        try:
+            doc = json.loads(content or "{}")
+        except ValueError:
+            return DeclaredLicence((), False)
+        if not isinstance(doc, dict):
+            return DeclaredLicence((), False)
+        return DeclaredLicence(
+            tuple(f"{k}={json.dumps(doc[k], sort_keys=True)}"
+                  for k in _JSON_LICENCE_KEYS if k in doc), True)
+    return DeclaredLicence(
+        tuple(m.group(0).strip()
+              for m in _DECLARATION_FIELDS[kind].finditer(content)), True)
 
 
 # One record per line of the leading comment region, in file order.

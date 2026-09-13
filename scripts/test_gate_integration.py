@@ -1267,3 +1267,135 @@ class TestSourceIsTheRealEstatesSourceList(GateCase):
         self.commit("edit the query, keep the header")
         report = self.assertBlocks("a -- comment header must be seen by check_a")
         self.assertIn("missing a notice", report)
+
+
+class TestStructuredLicenceDeclarations(GateCase):
+    """The declarations the SHIPPED artefacts carry, which nothing looked at.
+
+    HEADER_RE requires a colon and is a prose matcher. `"license": "AGPL-3.0"` in a
+    package.json, `License: AGPL-3` in debian/copyright, `license = "AGPL-3.0"` in a
+    Cargo.toml - none of them reached any check. Changing a package.json from AGPL-3.0
+    to MIT produced no candidate, no finding, and a report affirmatively stating that
+    no licence line had been altered. The .deb, the .rpm and the npm package all
+    carry that field; the header in the source file does not go in the tarball's
+    metadata.
+
+    These raise a CANDIDATE, never a block, and only when the licence field ITSELF
+    changed. A dependency bump rewrites package.json constantly, and blocking a bot
+    that cannot answer is the deadlock VENDOR_RE already exists to avoid.
+    """
+
+    def _change(self, path, before, after):
+        self.write(path, before)
+        self.write("src/app.js", "const x = 1;\n")
+        self.commit("base")
+        self.write(path, after)
+        self.commit("change the declaration")
+
+    def test_relicensing_a_package_json_reaches_a_reviewer(self):
+        self._change("package.json",
+                     '{"name":"thing","license":"AGPL-3.0"}\n',
+                     '{"name":"thing","license":"MIT"}\n')
+        report = self.assertClean("a licence field change must not block")
+        self.assertIn("A reviewer must answer these", report)
+        self.assertIn("package.json", report)
+        self.assertIn("licence declaration", report)
+
+    def test_the_old_and_new_values_are_both_named(self):
+        """"The licence field changed" sends a reviewer to go and find the diff. The
+        two values are the entire finding and they are already in hand."""
+        self._change("package.json",
+                     '{"license":"AGPL-3.0"}\n', '{"license":"MIT"}\n')
+        report = self.assertClean("still not blocking")
+        self.assertIn("AGPL-3.0", report)
+        self.assertIn("MIT", report)
+
+    def test_a_debian_copyright_relicence_reaches_a_reviewer(self):
+        self._change("debian/copyright",
+                     "Format: https://www.debian.org/doc/packaging-manuals/"
+                     "copyright-format/1.0/\nFiles: *\n"
+                     "Copyright: 2020 Example Corp\nLicense: AGPL-3\n",
+                     "Format: https://www.debian.org/doc/packaging-manuals/"
+                     "copyright-format/1.0/\nFiles: *\n"
+                     "Copyright: 2020 Example Corp\nLicense: MIT\n")
+        report = self.assertClean("a debian/copyright change must not block")
+        self.assertIn("debian/copyright", report)
+        self.assertIn("licence declaration", report)
+
+    def test_an_rpm_spec_relicence_reaches_a_reviewer(self):
+        self._change("packaging/thing.spec",
+                     "Name: thing\nVersion: 1.0\nLicense: AGPLv3\n",
+                     "Name: thing\nVersion: 1.0\nLicense: MIT\n")
+        self.assertIn("licence declaration",
+                      self.assertClean("an rpm spec change must not block"))
+
+    def test_a_cargo_toml_relicence_reaches_a_reviewer(self):
+        self._change("Cargo.toml",
+                     '[package]\nname = "thing"\nlicense = "AGPL-3.0"\n',
+                     '[package]\nname = "thing"\nlicense = "MIT"\n')
+        self.assertIn("licence declaration",
+                      self.assertClean("a Cargo.toml change must not block"))
+
+    def test_a_pyproject_relicence_reaches_a_reviewer(self):
+        self._change("pyproject.toml",
+                     '[project]\nname = "thing"\nlicense = "AGPL-3.0"\n',
+                     '[project]\nname = "thing"\nlicense = "MIT"\n')
+        self.assertIn("licence declaration",
+                      self.assertClean("a pyproject.toml change must not block"))
+
+    def test_a_reuse_toml_relicence_reaches_a_reviewer(self):
+        self._change("REUSE.toml",
+                     'version = 1\n[[annotations]]\n'
+                     'SPDX-License-Identifier = "AGPL-3.0-or-later"\n',
+                     'version = 1\n[[annotations]]\n'
+                     'SPDX-License-Identifier = "MIT"\n')
+        self.assertIn("licence declaration",
+                      self.assertClean("a REUSE.toml change must not block"))
+
+    def test_deleting_the_licence_field_outright_reaches_a_reviewer(self):
+        self._change("package.json",
+                     '{"name":"thing","license":"AGPL-3.0"}\n',
+                     '{"name":"thing"}\n')
+        self.assertIn("licence declaration",
+                      self.assertClean("removing the field must still be seen"))
+
+    def test_a_dependency_bump_that_leaves_the_licence_alone_is_silent(self):
+        """The cost of this design, stated: a touched package.json with an intact
+        licence field raises NOTHING. That silence is what buys the gate its
+        credibility on the hundreds of dependency bumps a year - and the field being
+        intact is a fact this check established, not one it assumed."""
+        self._change("package.json",
+                     '{"name":"thing","license":"AGPL-3.0",'
+                     '"dependencies":{"a":"1.0.0"}}\n',
+                     '{"name":"thing","license":"AGPL-3.0",'
+                     '"dependencies":{"a":"1.1.0"}}\n')
+        report = self.assertClean("a dependency bump must stay quiet")
+        self.assertNotIn("A reviewer must answer these", report)
+        self.assertIn("Nothing to do", report)
+
+    def test_a_declaration_that_cannot_be_parsed_is_a_question_not_a_pass(self):
+        """"No licence field changed" and "this file could not be read as JSON" must
+        never share a code path. A trailing comma is enough to make json.loads refuse,
+        and a check that could not run is not a clean result."""
+        self._change("package.json",
+                     '{"name":"t","license":"AGPL-3.0"}\n',
+                     '{"name":"t","license":"MIT",}\n')
+        report = self.assertClean("an unparseable declaration must not block")
+        self.assertIn("could not parse", report)
+        self.assertIn("UNKNOWN, not unchanged", report)
+
+    def test_a_package_lock_is_not_a_declaration_file(self):
+        """The anchor matters: `package-lock.json` must not match `package.json`, or
+        every dependency bump becomes a licence candidate."""
+        self._change("package-lock.json",
+                     '{"packages":{"a":{"version":"1.0.0"}}}\n',
+                     '{"packages":{"a":{"version":"1.1.0"}}}\n')
+        report = self.assertClean("a lockfile is not a licence declaration")
+        self.assertNotIn("A reviewer must answer these", report)
+
+    def test_a_new_package_json_declaring_a_licence_reaches_a_reviewer(self):
+        self._git("commit", "-q", "--allow-empty", "-m", "base")
+        self.write("package.json", '{"name":"thing","license":"MIT"}\n')
+        self.commit("add a package.json")
+        self.assertIn("licence declaration",
+                      self.assertClean("a new declaration must be seen"))
