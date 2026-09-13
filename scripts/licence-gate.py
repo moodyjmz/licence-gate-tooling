@@ -261,6 +261,12 @@ def check_b(base, head, pairs):
     holding, this becomes a hole. `binary_skips` is returned for exactly that reason -
     the caller feeds it to check_c rather than trusting the two to agree.
 
+    A DELETED binary is not in that list, and does not need to be. The deletion branch
+    runs first, so a `git rm` on a font never reaches the binary test; check_c's
+    `for p in deleted` loop raises it, which is the same guarantee by a different
+    route. Pinned by a test, because "it is covered by the other branch" is exactly the
+    sentence that precedes a file being covered by neither.
+
     BOTH ENDS, and only both. Testing the base blob alone gave a two-step attack whose
     every step was green: step one adds a comment full of undecodable bytes to a .js
     file - "Nothing to do"; step two deletes the upstream licence header and removes

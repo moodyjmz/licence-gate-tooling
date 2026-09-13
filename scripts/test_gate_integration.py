@@ -347,6 +347,20 @@ class TestBinaryIsDecidedTheWayGitDecidesIt(GateCase):
                       "true here, and only here: neither end has lines")
         self.assertEqual(code, 0, report)
 
+    def test_a_deleted_binary_reaches_a_human_by_the_other_branch(self):
+        """Deletion is now tested before binary is, so a deleted font never reaches
+        `binary_skips` and is carried by check_c's deleted loop instead. Two branches
+        that each assume the other covers a case is how a file ends up covered by
+        neither, so the surviving route is pinned rather than argued."""
+        self.write_bytes("assets/brand.ttf",
+                         b"\x00\x01\x00\x00Copyright (c) 2011 Example Foundry\xff\xfe")
+        self.write("src/a.js", "const a = 1;\n")
+        self.commit("base")
+        os.remove(os.path.join(self.dir, "assets/brand.ttf"))
+        self.commit("delete the font")
+        self.assertIn("assets/brand.ttf", self._candidates(),
+                      "a deleted binary must still reach the acknowledgement gate")
+
 
 class TestTheRegisterDoesNotBlockItself(GateCase):
     """The two files this whole programme writes its records into blocked every attempt
