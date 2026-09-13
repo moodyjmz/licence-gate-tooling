@@ -130,7 +130,10 @@ class TestCheckBWithoutADiffParser(GateCase):
     def test_a_deleted_file_is_not_a_gate_error(self):
         """The blob comparison asks git for both ends. A deletion has no head blob, and
         asking for one would turn an ordinary `git rm` into "the gate could not run" -
-        trading a false all-clear for a false alarm on every PR that removes a file."""
+        trading a false all-clear for a false alarm on every PR that removes a file.
+
+        It used to assert a BLOCK here, which encoded the defect below: see
+        TestDeletionIsAnswerableNotUnresolvable."""
         self.write("src/gone.js", LICENSED + "const x = 1;\n")
         self.write("src/stay.js", "const y = 1;\n")
         self.commit("base")
@@ -138,9 +141,8 @@ class TestCheckBWithoutADiffParser(GateCase):
         self.commit("remove the licensed file")
         code, report = self.run_gate()
         self.assertNotIn("could not run", report)
-        self.assertEqual(code, 1, report)
-        self.assertIn("removed or altered", report,
-                      "deleting a licensed file deletes its licence lines")
+        self.assertIn("src/gone.js", report,
+                      "a deleted licensed file must still reach a human")
 
     def test_a_pure_addition_is_not_read_as_a_removal(self):
         """The other end of the same asymmetry: an added file has no base blob. It must
@@ -257,6 +259,70 @@ class TestCheckBWithoutADiffParser(GateCase):
         report = self.assertClean("a submodule bump prompts a human; it does not error")
         self.assertNotIn("could not run", report)
         self.assertIn("vendor/dep", report)
+
+
+class TestDeletionIsAnswerableNotUnresolvable(GateCase):
+    """Found by a red-team round. `git rm src/licensed_file.js` blocked, telling the
+    reader to "restore the 2 licence lines ... by hand" - into a file that no longer
+    exists. The only exit was an admin bypass, and a gate that routinely needs bypassing
+    teaches everyone that bypassing is normal. This project has already learned that
+    lesson once, from vendored dependency bumps; see TestAutomatedDependencyUpdates.
+
+    Deleting a licensed file is the commonest shape of a replacement event, so it is a
+    CANDIDATE - a question a human answers - not a mechanical violation. check_b blocks
+    only where there is a head file to restore the line into."""
+
+    def _candidates(self):
+        p = subprocess.run(["python3", GATE, "--candidates", "HEAD~1", "HEAD"],
+                           cwd=self.dir, capture_output=True, text=True)
+        return p.stdout.split()
+
+    def test_deleting_a_licensed_file_asks_a_human_instead_of_blocking(self):
+        self.write("src/licensed_file.js", LICENSED + "const x = 1;\n")
+        self.write("src/stay.js", "const y = 1;\n")
+        self.commit("base")
+        os.remove(os.path.join(self.dir, "src/licensed_file.js"))
+        self.commit("delete the licensed file")
+        code, report = self.run_gate()
+        self.assertNotIn("removed or altered", report,
+                         "there is no file left to restore a line into")
+        self.assertNotIn("could not run", report)
+        self.assertIn("src/licensed_file.js", self._candidates(),
+                      "a deletion that raises no candidate is a silent pass, which is "
+                      "worse than the unresolvable block it replaced")
+        self.assertIn("src/licensed_file.js", report)
+        self.assertIn("A reviewer must answer these", report)
+        self.assertEqual(code, 0, report)
+        self.assertNotIn("- no licence or copyright line deleted or altered\n", report,
+                         "routing the deletion out of check_b must not buy a clean "
+                         "bill of health for a licensed file that was deleted")
+        self.assertIn("deleted outright", report,
+                      "the verified box may only carry claims the run established")
+
+    def test_a_rename_below_gits_similarity_threshold_hits_the_same_path(self):
+        """A rewrite too large for git to call a rename arrives as delete-plus-add, so
+        it walks into the same wall: the licence lines are gone from a path that no
+        longer exists.
+
+        The exit code is deliberately not asserted. The ADDED half is an unheadered
+        source file, which check_d blocks on for its own reasons - a real requirement
+        with a real remedy. What defect 2 is about is that check_b must not also demand
+        the impossible, and that the deletion still reaches the register."""
+        self.write("src/old_widget.js", LICENSED + "function widget() { return 1; }\n")
+        self.commit("base")
+        os.remove(os.path.join(self.dir, "src/old_widget.js"))
+        self.write("src/new_widget.js",
+                   "export class Thing {\n  constructor() { this.n = 42; }\n"
+                   "  run() { return this.n * 2; }\n}\n")
+        self.commit("replace the widget wholesale")
+        raw = self._git("diff", "--raw", "HEAD~1", "HEAD").stdout
+        self.assertIn("D\t", raw, "the rewrite must be below git's rename threshold")
+        self.assertIn("A\t", raw, "expected delete-plus-add, not R")
+        _code, report = self.run_gate()
+        self.assertNotIn("removed or altered", report,
+                         "the old path is gone; nothing can be restored into it")
+        self.assertIn("src/old_widget.js", self._candidates(),
+                      "the replacement must still reach the acknowledgement gate")
 
 
 class TestHeaderProminenceNotJustPresence(GateCase):

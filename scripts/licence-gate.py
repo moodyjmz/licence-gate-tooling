@@ -210,7 +210,7 @@ def check_b(base, head, pairs):
     holding, this becomes a hole. `binary_skips` is returned for exactly that reason -
     the caller feeds it to check_c rather than trusting the two to agree.
     """
-    violations, binary_skips, claims = [], [], []
+    violations, binary_skips, claims, deleted_headers = [], [], [], []
     for old_path, new_path, old_is_link, new_is_link in pairs:
         if both_ends_ignorable(old_path, new_path):
             continue
@@ -238,12 +238,36 @@ def check_b(base, head, pairs):
         if looks_binary(before):
             binary_skips.append(new_path or old_path)
             continue
-        # No head blob means every line of the base is gone, which is the truth and the
-        # over-detecting direction. Both cases are real: an ordinary `git rm`, and a
-        # licensed file overwritten by a gitlink at the same path. Asking `git show`
-        # for either would turn a deletion into "the gate could not run".
-        after = ("" if new_path is None or new_is_link
-                 else read_at(head, new_path, "the modified file"))
+        # A WHOLE-FILE DELETION IS A QUESTION, NOT A VIOLATION. These two cases used to
+        # be fused as "no head blob means every line of the base is gone", which is
+        # literally true and produced an instruction nobody can follow: `git rm` on a
+        # licensed file blocked, telling the reader to restore the licence lines by hand
+        # into a file that does not exist. The only exit was an admin bypass, and a gate
+        # that routinely needs bypassing teaches the team that bypassing is normal -
+        # exactly the lesson VENDOR_RE above exists to stop teaching. A rename whose
+        # rewrite falls below git's similarity threshold arrives as delete-plus-add and
+        # walked into the same wall.
+        #
+        # Deletion is the commonest shape of a replacement event, and check_c already
+        # raises every deleted path as a candidate a human must answer, so this routes
+        # rather than narrows: it moves out of the blocking path into the human one.
+        # The guarantee is check_c's `for p in deleted` loop; if that ever stops
+        # holding, this becomes a silent pass.
+        if new_path is None:
+            # Recorded, though, because the verified box is not allowed to certify what
+            # this run did not establish. Saying "no licence or copyright line deleted
+            # or altered" under a heading that tells the reviewer not to look, on a pull
+            # request that deleted a licensed file outright, would be a false all-clear
+            # created by the routing above rather than removed by it.
+            if any(has_licence_header(l) for l in before.split("\n")):
+                deleted_headers.append(old_path)
+            continue
+        # A gitlink at the same path is NOT a deletion and still blocks. The entry is
+        # still there, the base blob is perfectly readable, and the remedy - do not
+        # overwrite a licensed file with a submodule pointer - is one a person can
+        # actually carry out. Treating it as "no head blob" is how replacing a licensed
+        # file with a submodule passed in silence once already.
+        after = "" if new_is_link else read_at(head, new_path, "the modified file")
         present = set(after.split("\n"))
         # The leading comment region of each end, as the set of its own lines. Taken
         # from licence_map's single definition and split back up rather than walked
@@ -282,7 +306,7 @@ def check_b(base, head, pairs):
         for line in after.split("\n"):
             if has_licence_header(line) and line not in was_there:
                 claims.append((new_path or old_path, line.strip()))
-    return violations, binary_skips, claims
+    return violations, binary_skips, claims, deleted_headers
 
 
 def read_at(rev, path, what):
@@ -609,7 +633,7 @@ def main(argv, author=None):
     base_paths.update({new: old for old, new in renamed})
 
     if candidates_only:
-        _, binary_skips, claims = check_b(base, head, pairs)
+        _, binary_skips, claims, _deleted_headers = check_b(base, head, pairs)
         for p, _ in check_c(added, modified, deleted, renamed, gitlinks,
                             binary_skips, claims):
             print(p)
@@ -626,7 +650,7 @@ def main(argv, author=None):
             print(f"could not auto-fix: {p}", file=sys.stderr)
         return 0 if not unfixable else 3
 
-    b, binary_skips, claims = check_b(base, head, pairs)
+    b, binary_skips, claims, deleted_headers = check_b(base, head, pairs)
     a = check_a(base, head, modified_for_a, base_paths, gitlinks)
     c = check_c(added, modified, deleted, renamed, gitlinks, binary_skips, claims)
     d_src, d_assets, d_links = check_d(head, added, gitlinks)
@@ -811,12 +835,24 @@ def main(argv, author=None):
     # less is the price of the section being trustworthy at all.
     verified = []
     if not b:
+        # Deleted files carry the same obligation as binaries do. check_b no longer
+        # blocks on a whole-file deletion - there is no file to restore a line into -
+        # so an unqualified "nothing was deleted" would be a false all-clear invented
+        # by that routing. The files are listed as candidates above; this line says so
+        # rather than certifying past them.
+        caveats = []
+        if binary_skips:
+            caveats.append(f"{len(binary_skips)} binary file(s) have no lines to "
+                           f"compare")
+        if deleted_headers:
+            caveats.append(f"{len(deleted_headers)} licensed file(s) were deleted "
+                           f"outright")
         verified.append(
             "no licence or copyright line deleted or altered"
-            if not binary_skips else
-            f"no licence or copyright line deleted or altered in text files "
-            f"({len(binary_skips)} binary file(s) have no lines to compare and are "
-            f"listed above for your decision instead)")
+            if not caveats else
+            "no licence or copyright line deleted or altered in the files that still "
+            "exist as text ({} and are listed above for your decision instead)"
+            .format(", ".join(caveats)))
     if not a:
         verified.append("every modified file with a header carries a notice")
     if verified:
