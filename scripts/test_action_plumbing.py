@@ -249,6 +249,81 @@ class TestTemporaryFilesAreScopedToTheRun(unittest.TestCase):
                 self.assertIn("steps", yaml.safe_load(path.read_text())["runs"])
 
 
+class MoveCheckCase(unittest.TestCase):
+    """The step that refuses when the branch moved after the command was issued.
+
+    It asks the remote where the branch points. Three answers are possible and they
+    are three different things: the remote could not be asked, the branch is gone, and
+    the branch points somewhere else. Reporting the first as the third tells a reader
+    a specific untrue thing about their branch, and it is the failure this whole
+    codebase is organised against - a question that could not be asked, answered
+    anyway.
+    """
+
+    action = None
+    step = "Refuse if the branch moved after the command"
+    HEAD = "c" * 40
+
+    def setUp(self):
+        self.script = step_run(self.action, self.step)
+        self.tmp = tempfile.mkdtemp()
+        self.bin = os.path.join(self.tmp, "bin")
+        os.makedirs(self.bin)
+
+    def stub_git(self, stdout="", code=0):
+        answer = os.path.join(self.tmp, "ls-remote-answer")
+        with open(answer, "w", encoding="utf-8") as fh:
+            fh.write(stdout)
+        with open(os.path.join(self.bin, "git"), "w", encoding="utf-8") as fh:
+            fh.write(f'#!/bin/sh\ncat "{answer}"\nexit {code}\n')
+        os.chmod(os.path.join(self.bin, "git"), 0o755)
+
+    def run_step(self):
+        return subprocess.run(
+            ["bash", "-c", self.script], cwd=self.tmp,
+            env={"PATH": self.bin + os.pathsep + os.environ["PATH"],
+                 "HEAD_SHA": self.HEAD, "REF": "a-branch"},
+            capture_output=True, text=True)
+
+    def test_an_unchanged_branch_passes(self):
+        self.stub_git(f"{self.HEAD}\trefs/heads/a-branch\n")
+        self.assertEqual(self.run_step().returncode, 0)
+
+    def test_a_moved_branch_is_refused(self):
+        self.stub_git("d" * 40 + "\trefs/heads/a-branch\n")
+        result = self.run_step()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertRegex(result.stdout + result.stderr, r"(?i)moved")
+
+    def test_a_remote_that_could_not_be_asked_does_not_report_a_move(self):
+        """The failing call left the answer empty, and an empty answer compared
+        unequal to the head commit - so a network error was reported as "moved from
+        <sha> to " and the reader was told something specific and false."""
+        self.stub_git("", code=128)
+        result = self.run_step()
+        self.assertNotEqual(result.returncode, 0)
+        output = result.stdout + result.stderr
+        self.assertNotRegex(output, r"(?i)moved")
+        self.assertRegex(output, r"(?i)could not")
+
+    def test_a_branch_that_is_gone_says_so(self):
+        self.stub_git("", code=0)
+        result = self.run_step()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertNotRegex(result.stdout + result.stderr, r"(?i)moved")
+
+
+class TestAutoFixMoveCheck(MoveCheckCase):
+    action = "auto-fix"
+
+
+class TestStdLicenceMoveCheck(MoveCheckCase):
+    action = "std-licence"
+
+
+del MoveCheckCase  # a base class, not a case in its own right
+
+
 @unittest.skipUnless(NODE, "node is needed to run a github-script step body")
 class ScriptStepCase(unittest.TestCase):
     """Run a github-script body against stubs that behave like the API."""

@@ -89,7 +89,22 @@ runs:
         HEAD_SHA: ${{ steps.ctx.outputs.head_sha }}
         REF: ${{ steps.ctx.outputs.ref }}
       run: |
-        remote="$(git ls-remote origin "refs/heads/${REF}" | cut -f1)"
+        set -uo pipefail
+        # Three answers, three outcomes. Unchecked, a call that FAILED left the answer
+        # empty, and an empty answer compares unequal to the head commit - so a remote
+        # that could not be reached was reported as "moved from <sha> to ", which tells
+        # the reader a specific untrue thing about their branch.
+        if ! remote="$(git ls-remote origin "refs/heads/${REF}" | cut -f1)"; then
+          echo "Could not ask the remote where ${REF} points." >&2
+          echo "Refusing: an assertion of authorship must be made about a tree this" >&2
+          echo "step has confirmed is still there, not one it could not ask about." >&2
+          exit 1
+        fi
+        if [ -z "$remote" ]; then
+          echo "${REF} is no longer on the remote." >&2
+          echo "Refusing: the tree the assertion was made about is gone." >&2
+          exit 1
+        fi
         if [ "$remote" != "$HEAD_SHA" ]; then
           echo "Branch moved from ${HEAD_SHA} to ${remote} after the command was issued."
           echo "Refusing: this command asserts authorship over a tree that is no longer there."

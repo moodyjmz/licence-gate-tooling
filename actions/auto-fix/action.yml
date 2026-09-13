@@ -88,7 +88,22 @@ runs:
         HEAD_SHA: ${{ steps.auth.outputs.head_sha }}
         REF: ${{ steps.auth.outputs.ref }}
       run: |
-        remote="$(git ls-remote origin "refs/heads/${REF}" | cut -f1)"
+        set -uo pipefail
+        # Three answers, three outcomes. Unchecked, a call that FAILED left the answer
+        # empty, and an empty answer compares unequal to the head commit - so a remote
+        # that could not be reached was reported as "moved from <sha> to ", which tells
+        # the reader a specific untrue thing about their branch.
+        if ! remote="$(git ls-remote origin "refs/heads/${REF}" | cut -f1)"; then
+          echo "Could not ask the remote where ${REF} points." >&2
+          echo "Refusing: that the branch did not move is not something this step can" >&2
+          echo "conclude from a question it never got an answer to." >&2
+          exit 1
+        fi
+        if [ -z "$remote" ]; then
+          echo "${REF} is no longer on the remote." >&2
+          echo "Refusing: there is nothing left to apply this fix against." >&2
+          exit 1
+        fi
         if [ "$remote" != "$HEAD_SHA" ]; then
           echo "Branch moved from ${HEAD_SHA} to ${remote} after the command was issued."
           echo "Refusing: the fix would land on a tree nobody asked about."
