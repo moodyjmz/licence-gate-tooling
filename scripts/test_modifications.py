@@ -446,7 +446,7 @@ class TestOwnershipComesFromWhatAMergeIntroduces(RepoCase):
         self.on_branch("our-b", ("src/b.js", "feat: ours", self.OURS))
         self.octopus("Merge branches 'up-a' and 'our-b'", "Land two branches at once",
                      ["up-a", "our-b"], author=self.UPSTREAM)
-        self.assertEqual(len(self.subjects()), 1)
+        self.assertEqual(self.subjects(), ["Land two branches at once"])
 
     def test_a_merge_that_introduces_nothing_is_ours(self):
         """Vacuously, every commit it introduced is upstream's - which would exclude it
