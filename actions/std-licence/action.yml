@@ -69,7 +69,7 @@ runs:
           // against the tree the assertion was actually made about.
           core.setOutput('head_sha', pr.data.head.sha);
           if (pr.data.head.repo.full_name !== `${owner}/${repo}`) {
-            core.setFailed('Fork pull requests cannot be written to by this action.');
+            core.setFailed('Fork pull requests are out of scope for this command. The restriction predates the patch comment and is retained unreviewed.');
           }
 
     - name: Check out the commit the command was issued against
@@ -109,8 +109,9 @@ runs:
     #
     # This action used to commit and push to the pull request branch as
     # github-actions[bot], and carried a commit trailer whose only job was to name
-    # the person the bot commit was made on behalf of. Both are gone. A bot push makes the bot the last pusher, which is
-    # exactly what require_last_push_approval is there to prevent: whoever pushed to
+    # the person the bot commit was made on behalf of. Both are gone. A bot push
+    # makes the bot the last pusher, which is exactly what
+    # require_last_push_approval is there to prevent: whoever pushed to
     # the branch a moment earlier may then approve their own commit, and the record
     # says "approved by them", truthfully and uselessly. The push also moves the
     # head, dismissing reviews already given.

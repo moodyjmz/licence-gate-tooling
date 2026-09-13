@@ -70,7 +70,7 @@ runs:
           // against the tree the commenter actually asked about.
           core.setOutput('head_sha', pr.data.head.sha);
           if (pr.data.head.repo.full_name !== `${owner}/${repo}`) {
-            core.setFailed('Fork pull requests cannot be written to by this action.');
+            core.setFailed('Fork pull requests are out of scope for this command. The restriction predates the patch comment and is retained unreviewed.');
           }
 
     - name: Check out the commit the command was issued against
