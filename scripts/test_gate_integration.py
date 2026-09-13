@@ -1815,6 +1815,24 @@ class TestStampingAHeaderLeavesTheRestOfTheFileAlone(GateCase):
                         "byte; only the header may be new\n"
                         f"--- file is now ---\n{after!r}")
 
+    def test_a_crlf_file_that_already_has_a_header_is_not_stamped_twice(self):
+        """The inverse risk of reading with newline="". Every line in the region now
+        keeps its trailing carriage return, and the header predicate has to go on
+        recognising a header despite it. If it stops, a file with Windows line endings
+        reads as headerless and gets a second copyright block written above the one it
+        already had - which is this tool asserting a claim over a file whose existing
+        claim it failed to see."""
+        header = (b"// SPDX-FileCopyrightText: 2026 Example project contributors\r\n"
+                  b"// SPDX-License-Identifier: Example-1.0\r\n")
+        self._write_bytes("src/base.js", b"const z = 0;\r\n")
+        self.commit("base")
+        self._write_bytes("src/new.js", header + b"const a = 1;\r\n")
+        self.commit("add a headered file with windows line endings")
+        out = self._stamp("src/new.js")
+        self.assertIn("already carries a header", out)
+        self.assertEqual(self._read_bytes("src/new.js"), header + b"const a = 1;\r\n",
+                         "a refused file must not be written to at all")
+
     def test_an_lf_file_is_not_given_carriage_returns(self):
         """The other direction of the same rule: nothing may change an ending it was
         not asked to change."""
