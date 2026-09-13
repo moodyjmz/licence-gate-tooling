@@ -576,7 +576,27 @@ def check_d(head, added, gitlinks=()):
     source file and the other fell through every branch. Neither is a file at all, and
     the name never had anything to say about it.
 
-    Returns (needing, assets, links).
+    KNOWN HOLE, NOT FIXED HERE, AND WIDENED BY THE SOURCE_RE EXTENSION. A new source
+    file that ALREADY carries a header produces nothing at all: it is not
+    `needs_provenance`, so it takes the SOURCE_RE branch, has a header, and is appended
+    to no list. A third-party file added with upstream's own header intact - the
+    commonest way vendored code arrives - is therefore invisible to check_d, and
+    check_c's added-loop skips it too.
+
+    That hole pre-existed for `.js`, `.py`, `.c` and the rest of the original list.
+    Widening SOURCE_EXTENSIONS moved `.php`, `.vue`, `.scss`, `.xml` and the others
+    INTO it: before, they fell to the asset branch and raised "asset added. Where did
+    it come from?", and now they do not. Measured, not assumed - a headered
+    `src/vendored.php` raised a candidate before the widening and reports "Nothing to
+    do" after it.
+
+    Deliberately left, because the obvious fix is worse: routing every headered new
+    source file to provenance fires on every first-party file anyone adds, and a gate
+    that prompts on ordinary work is a gate people learn to click past. Closing it
+    properly means asking whether the header is OURS - comparing the new file's header
+    against licence_map.header_texts for the licence its path maps to - which is a
+    different check with its own false-positive profile and belongs in its own commit
+    with its own corpus.
     """
     needing, assets, links = [], [], []
     for p in added:
@@ -759,11 +779,16 @@ def _add_reason(cands, path, why):
     gives the acknowledgement gate two keys for one file. Appending to the existing
     reason keeps the specific finding visible - `.gitattributes` raises a bland "asset
     modified" already, and "asset modified" is not what the reviewer needs to be told.
+
+    THE SPECIFIC REASON LEADS. Merging it onto the end produced `.gitattributes —
+    asset modified; .gitattributes adds or changes a diff-hiding attribute...`, and a
+    reviewer scanning a list of candidates reads "asset modified" and moves on. The
+    finding that earned its own check goes first; the generic one follows as context.
     """
     for i, (p, existing) in enumerate(cands):
         if p == path:
             if why not in existing:
-                cands[i] = (p, existing + "; " + why)
+                cands[i] = (p, why + " (also: " + existing + ")")
             return
     cands.append((path, why))
 

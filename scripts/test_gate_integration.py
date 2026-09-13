@@ -1464,6 +1464,23 @@ class TestGitattributesCanHideTheDiffBeingSigned(GateCase):
         self.assertIn("src/payroll.js", reason)
         self.assertIn("collapsed", reason)
 
+    def test_marking_images_binary_gets_the_strong_wording_too(self):
+        """PINNED BECAUSE IT IS NOISE, and the noise was chosen. `*.png binary` is a
+        routine line in any real .gitattributes, and it lands here with the full
+        diff-hiding wording. `binary` is exactly `-diff -merge -text`, so the sentence
+        is TRUE of it - a change under that pattern really is never displayed - it is
+        merely uninteresting for a PNG. Dropping `binary` from the set would read
+        better and would lose `src/payroll.js binary`, which is the same attack as
+        `-diff` spelled differently. Narrowing detection so a report looks tidier is
+        the one trade this tool does not make.
+
+        It fires ONCE, on the commit that adds the line, not on every commit after -
+        the comparison is against the base's own attribute lines."""
+        self._attributes("* text=auto\n", "* text=auto\n*.png binary\n")
+        reason = self._reason(self.assertClean("attributes must not block"))
+        self.assertIn("*.png", reason)
+        self.assertIn("collapsed", reason)
+
     def test_a_nested_gitattributes_is_not_missed(self):
         self._attributes("* text=auto\n",
                          "* text=auto\nledger.js linguist-generated\n",
