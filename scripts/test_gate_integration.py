@@ -1689,3 +1689,79 @@ class TestANewFileWearingSomeoneElsesHeader(GateCase):
             self.assertIn(path, report,
                           f"{path} is demanded by the acknowledgement gate but the "
                           f"report never names it, so nobody can answer it")
+
+
+class TestWhichReasonACandidateGets(GateCase):
+    """A path can qualify as a candidate several ways over, and only the first reason
+    recorded is the one the reviewer reads. Which loop runs first therefore decides
+    what the report says, and nothing asserted it: the candidate list was checked for
+    the PATH everywhere and for the SENTENCE nowhere, so a reordering that silently
+    swapped a specific reason for a generic one changed no test result.
+
+    The rule being pinned here is the one `_add_reason` states: the specific finding
+    leads, the generic one follows as context.
+    """
+
+    def _candidate_line(self, report, path):
+        """The candidate bullet for `path`, and only that one.
+
+        A submodule is also named in the "New files" section, whose bullets open
+        identically, so matching on the prefix alone would pick up either."""
+        head = f"- `{path}` — "
+        lines = [l[len(head):] for l in report.split("\n") if l.startswith(head)]
+        if not lines:
+            self.fail(f"no finding for {path}\n--- gate said ---\n{report}")
+        return lines
+
+    def test_a_submodule_under_a_vendor_tree_is_still_called_a_submodule(self):
+        """`vendor/dep` matches VENDOR_RE and is a gitlink. Both reasons are true and
+        one of them is useful: "third-party tree changed" invites the reviewer to read
+        a diff, and there is no diff to read, because the content is in another
+        repository. Told the generic one, they go looking for something that is not
+        there."""
+        self.write("src/a.js", "const a = 1;\n")
+        self.commit("base")
+        self._git("update-index", "--add", "--cacheinfo",
+                  f"160000,{'a' * 40},vendor/dep")
+        self._git("commit", "-q", "-m", "vendor a submodule into a vendor tree")
+        report = self.assertClean("a submodule prompts a human; it does not block")
+        reasons = self._candidate_line(report, "vendor/dep")
+        self.assertTrue(any(r.startswith("submodule (gitlink)") for r in reasons),
+                        f"the submodule reason must lead: {reasons}")
+        self.assertFalse(any(r.startswith("third-party tree changed") for r in reasons),
+                         f"the generic tree reason must not displace it: {reasons}")
+
+    def test_a_submodule_outside_a_vendor_tree_reads_the_same(self):
+        """The control. Both shapes are submodules and both reviewers need the same
+        sentence; only the path differs."""
+        self.write("src/a.js", "const a = 1;\n")
+        self.commit("base")
+        self._git("update-index", "--add", "--cacheinfo",
+                  f"160000,{'b' * 40},ext/dep")
+        self._git("commit", "-q", "-m", "add a submodule outside any vendor tree")
+        report = self.assertClean("a submodule prompts a human; it does not block")
+        reasons = self._candidate_line(report, "ext/dep")
+        self.assertTrue(any(r.startswith("submodule (gitlink)") for r in reasons),
+                        f"the submodule reason must lead: {reasons}")
+
+    def test_an_attributes_change_leads_with_the_attribute_and_keeps_the_asset_note(self):
+        """`.gitattributes` matches no source or text pattern, so it arrives as "asset
+        modified" before the attribute check has said anything. The merged form is the
+        contract: the finding that earned its own check first, the generic one behind
+        it as context rather than instead of it."""
+        self.write(".gitattributes", "* text=auto\n")
+        self.write("src/app.js", "const x = 1;\n")
+        self.commit("base")
+        self.write(".gitattributes", "* text=auto\nsrc/payroll.js linguist-generated\n")
+        self.commit("hide a diff")
+        report = self.assertClean("attributes must not block")
+        reasons = self._candidate_line(report, ".gitattributes")
+        self.assertEqual(len(reasons), 1,
+                         f"one bullet per candidate, or the reviewer answers it twice: "
+                         f"{reasons}")
+        self.assertNotIn("asset modified (also:", reasons[0],
+                         "the generic reason must not lead")
+        self.assertIn("linguist-generated", reasons[0].split(" (also:")[0],
+                      "the specific finding leads")
+        self.assertIn("(also: asset modified)", reasons[0],
+                      "and the generic one survives as context")

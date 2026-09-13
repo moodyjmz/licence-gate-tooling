@@ -825,13 +825,23 @@ def check_c(added, modified, deleted, renamed, gitlinks=(), binary_skips=(),
     for p in modified:
         if is_asset(p) and p not in gitlinks:
             cands.append((p, "asset modified"))
+    # ONE dedup, and the loops inside it run most specific first. `seen` is
+    # first-writer-wins, so the order below is what decides which of several true
+    # reasons the reviewer is actually shown - it is behaviour, not layout. A vendored
+    # submodule qualifies twice over, and "third-party tree changed" sends the reviewer
+    # to read a diff that does not exist in this repository.
+    seen = {p for p, _ in cands}
     # Every gitlink, whatever its name and whatever git called the change. A submodule
     # is a pointer at a tree in another repository, which is unrecorded vendored
     # content by definition, and a bump silently swaps all of it. It reached no list
     # and raised no candidate at all, so the acknowledgement gate reported "No
     # replacement candidates detected" - a false all-clear on the one thing this tool
     # is for.
-    seen = {p for p, _ in cands}
+    for p in sorted(gitlinks):
+        if p not in seen:
+            cands.append((p, "submodule (gitlink) added or changed - its content lives "
+                             "in another repository and is not in this diff"))
+            seen.add(p)
     for path, line in claims:
         if path not in seen:
             cands.append((path, "a NEW ownership or licence claim appears in this file "
@@ -842,27 +852,12 @@ def check_c(added, modified, deleted, renamed, gitlinks=(), binary_skips=(),
             cands.append((p, "third-party tree changed - upstream content landing in "
                              "our repository, which is a replacement whoever did it"))
             seen.add(p)
-    for p in sorted(gitlinks):
-        if p not in seen:
-            cands.append((p, "submodule (gitlink) added or changed - its content lives "
-                             "in another repository and is not in this diff"))
     # check_b skips binary blobs: they have no lines to remove, so a hit there says
     # nothing that "this asset changed" did not, in a form nobody can act on. That is
     # only routing rather than narrowing if every one of them reaches a reviewer here,
     # so the skipped paths are passed in and added explicitly instead of trusting the
     # extension rules to have covered them. A binary named .js would otherwise be
     # skipped by check_b and classified as source by check_c, and vanish between them.
-    seen = {p for p, _ in cands}
-    for path, line in claims:
-        if path not in seen:
-            cands.append((path, "a NEW ownership or licence claim appears in this file "
-                                "— only a person can say whether it is true"))
-            seen.add(path)
-    for p in list(added) + list(modified) + list(deleted):
-        if VENDOR_RE.match(p) and p not in seen:
-            cands.append((p, "third-party tree changed - upstream content landing in "
-                             "our repository, which is a replacement whoever did it"))
-            seen.add(p)
     for p in binary_skips:
         if p not in seen:
             cands.append((p, "binary content changed - no line-level check is possible, "
