@@ -120,11 +120,83 @@ runs:
           const fs = require('fs');
           const reportPath =
             `${process.env.RUNNER_TEMP || '/tmp'}/licence-gate-report.md`;
-          const body = fs.readFileSync(reportPath, 'utf8');
           const marker = '<!-- licence-gate -->';
           const sha = process.env.HEAD_SHA;
-          const text = `${marker}\n## Licence gate\n\n${body}\n\n---\n<sub>Evaluated at \`${sha.substring(0,9)}\`. A disposition made against an earlier commit does not carry over.</sub>`;
           const {owner, repo} = context.repo;
+
+          // NO REPORT IS NOT AN EMPTY REPORT.
+          //
+          // The step above redirects the gate's stdout to this file and then exits on
+          // `cat`, which succeeds whatever the gate did. A missing python3 or a moved
+          // script path therefore leaves the file created and EMPTY, and posting it
+          // publishes a report with nothing in it - indistinguishable from a report
+          // with nothing to say, on a pull request nothing examined. The patch-comment
+          // steps already refuse to describe a tree they cannot account for; this is
+          // the same refusal.
+          if (!fs.existsSync(reportPath)) {
+            core.setFailed('The licence gate produced no report file. Nothing was ' +
+              'examined, so nothing is being said about this pull request.');
+            return;
+          }
+          const body = fs.readFileSync(reportPath, 'utf8');
+          if (!body.trim()) {
+            core.setFailed('The licence gate produced an empty report. That is not the ' +
+              'same as a clean one - see the run log for what the gate did.');
+            return;
+          }
+
+          const wrap = (content) => `${marker}\n## Licence gate\n\n${content}\n\n---\n<sub>Evaluated at \`${sha.substring(0,9)}\`. A disposition made against an earlier commit does not carry over.</sub>`;
+
+          // A comment body is capped at 65536 characters; over it the API answers 422,
+          // the step throws, and no comment appears at all - on the widest pull
+          // requests, which are the ones a reviewer cannot reconstruct by eye. The
+          // same 60000 the patch comment budgets to, for the same reason.
+          const LIMIT = 60000;
+          let text = wrap(body);
+          if (text.length > LIMIT) {
+            // The full report goes to the step summary FIRST, so the pointer below is
+            // a fact rather than a hope.
+            await core.summary.addRaw(body).write();
+            const runUrl =
+              `${context.serverUrl}/${owner}/${repo}/actions/runs/${context.runId}`;
+            // Truncating the report here would reproduce exactly the failure the patch
+            // comment refuses: a body cut off at the cap reads as complete. So the
+            // degraded comment is a DIFFERENT document - the headings, which carry the
+            // counts, and the list of what has to happen - and it says what it is.
+            const lines = body.split('\n');
+            const CAP = 200;
+            const take = (re) => {
+              const all = lines.filter(l => re.test(l));
+              return [all.slice(0, CAP), Math.max(0, all.length - CAP)];
+            };
+            let [todo, dropped] = take(/^\d+\.\s+\*\*/);
+            let [headings, droppedHeadings] = take(/^#{2,4}\s+\S/);
+            dropped += droppedHeadings;
+            for (;;) {
+              const out = [
+                `**This report is ${body.length} characters and does not fit in a ` +
+                `comment.** Nothing was dropped from the checks - only from this ` +
+                `comment. The full report is in the [step summary and run log](${runUrl}).`,
+                '',
+              ];
+              if (todo.length) {
+                out.push('### What has to happen before this merges', '', ...todo, '');
+              }
+              if (headings.length) {
+                out.push('### What the full report contains', '',
+                         ...headings.map(h => `- ${h.replace(/^#+\s+/, '')}`), '');
+              }
+              if (dropped) {
+                out.push(`_${dropped} further line(s) are in the full report only._`);
+              }
+              text = wrap(out.join('\n'));
+              if (text.length <= LIMIT) break;
+              if (headings.length) headings.pop();
+              else if (todo.length) todo.pop();
+              else break;
+              dropped += 1;
+            }
+          }
           const issue_number = context.issue.number;
           // Paginated, as actions/acknowledgement does it. Unpaginated this returns
           // the first 30 comments, so on any longer discussion the marker is not

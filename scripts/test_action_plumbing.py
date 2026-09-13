@@ -322,5 +322,112 @@ class TestTheGateFindsItsOwnCommentOnALongThread(ScriptStepCase):
         self.assertIn(MARKER, result["posted"][0])
 
 
+class TestTheGateNeverPostsSomethingItHasNotEarned(ScriptStepCase):
+    """The report is the gate's voice. Losing it is not the same as having nothing to say.
+
+    Two ways that happened. A report longer than GitHub's 65536-character comment cap
+    is rejected with a 422, the step throws and NO comment appears - on the widest
+    pull requests, which are the ones a reviewer cannot reconstruct by eye. And a
+    report file that is empty, because the script could not be found or run at all,
+    was posted as an empty comment: a report saying nothing, which reads as a report
+    with nothing to say.
+
+    The patch-comment steps already refuse an oversized patch and already fail on a
+    missing body file. This is the same pair of guards on the other side of the tool.
+    """
+
+    action = "gate"
+    step = "Post or update the review comment"
+
+    def big_report(self, files=4000):
+        lines = [
+            "### What has to happen before this merges",
+            "",
+            "1. **the author** — restore 1 licence line",
+            f"2. **a reviewer, NOT @someone** — answer every one of the {files} candidates below",
+            "",
+            f"### Blocking — {files} licence line(s) removed or altered",
+            "",
+        ]
+        lines += [f"- `src/deeply/nested/path-{i}.js`" for i in range(files)]
+        lines += ["", "### Candidates — a reviewer has to answer these", ""]
+        lines += [f"- `vendor/thing-{i}` — third-party tree changed" for i in range(files)]
+        return "\n".join(lines) + "\n"
+
+    def test_an_empty_report_is_a_failure_and_not_an_empty_comment(self):
+        """"The gate could not run" and "the gate found nothing" must not share an exit.
+
+        A missing python3 or a wrong script path leaves the redirected file created
+        and empty, and the step that produced it exits on `cat`, which succeeds.
+        """
+        self.write_report("")
+        result = self.run_step(HEAD_SHA="a" * 40)
+        self.assertEqual(result["posted"], [])
+        self.assertEqual(result["updated"], [])
+        self.assertTrue(result["failed"], "an empty report was not reported as one")
+
+    def test_a_whitespace_only_report_is_a_failure(self):
+        self.write_report("\n  \n\t\n")
+        result = self.run_step(HEAD_SHA="a" * 40)
+        self.assertEqual(result["posted"], [])
+        self.assertTrue(result["failed"])
+
+    def test_a_missing_report_is_a_failure_and_not_a_crash(self):
+        result = self.run_step(HEAD_SHA="a" * 40)
+        self.assertEqual(result["posted"], [])
+        self.assertTrue(result["failed"],
+                        "a missing report must be said out loud, not thrown")
+
+    def test_an_oversized_report_still_leaves_a_comment(self):
+        report = self.big_report()
+        self.assertGreater(len(report), 65536, "the fixture is not actually oversized")
+        self.write_report(report)
+        result = self.run_step(HEAD_SHA="a" * 40)
+        self.assertIsNone(result["threw"], "the post threw; no comment would appear")
+        self.assertEqual(len(result["posted"]), 1)
+        self.assertLess(len(result["posted"][0]), 65536)
+
+    def test_an_oversized_report_says_it_is_not_the_whole_report(self):
+        """A body cut off mid-report applies the same deception the patch guard names:
+        it reads as complete. It has to say what it is."""
+        self.write_report(self.big_report())
+        body = self.run_step(HEAD_SHA="a" * 40)["posted"][0]
+        self.assertRegex(body.lower(), r"(does not fit|too large|not the full)")
+        self.assertNotIn("path-3999", body,
+                         "the body is a truncation of the report, not a summary of it")
+
+    def test_an_oversized_report_still_carries_the_counts_and_what_blocks(self):
+        """Degrading to a body that says only "it was too long" would be honest and
+        useless. The reviewer needs the counts and the list of what to do."""
+        body = None
+        self.write_report(self.big_report())
+        body = self.run_step(HEAD_SHA="a" * 40)["posted"][0]
+        self.assertIn("Blocking — 4000 licence line(s) removed or altered", body)
+        self.assertIn("restore 1 licence line", body)
+        self.assertIn("answer every one of the 4000 candidates", body)
+
+    def test_an_oversized_report_points_somewhere_the_full_one_actually_is(self):
+        """"See the log" is only useful if the full report is in the log."""
+        report = self.big_report()
+        self.write_report(report)
+        result = self.run_step(HEAD_SHA="a" * 40)
+        self.assertIn("actions/runs/4242", result["posted"][0])
+        self.assertIn("path-3999", result["summary"],
+                      "the body points at a step summary that does not hold the report")
+
+    def test_an_oversized_report_keeps_the_marker(self):
+        """Without it the next push cannot find this comment and posts another."""
+        self.write_report(self.big_report())
+        self.assertIn(MARKER, self.run_step(HEAD_SHA="a" * 40)["posted"][0])
+
+    def test_a_report_that_fits_is_posted_whole(self):
+        """The guard must not become the common path."""
+        self.write_report("### Blocking — 1 licence line(s) removed or altered\n\n"
+                          "- `src/thing.js`\n")
+        body = self.run_step(HEAD_SHA="a" * 40)["posted"][0]
+        self.assertIn("- `src/thing.js`", body)
+        self.assertNotRegex(body.lower(), r"(does not fit|too large)")
+
+
 if __name__ == "__main__":
     unittest.main()
