@@ -54,6 +54,54 @@ def sh_strict(*args):
     return r.stdout
 
 
+def merge_base(base, head):
+    """The commit the two actually diverged at. Raises if it cannot be computed.
+
+    The base a pull request event hands the gate is `pull_request.base.sha` - the base
+    BRANCH'S CURRENT TIP, not the point the branch was cut. Diffing tip..head replays
+    everything the base branch gained since, in reverse, against the author: a licence
+    header added on main last week is reported as a header THIS pull request removed,
+    on a file it never touched, with a modification notice demanded for good measure.
+    Every stale branch showed the base branch's own recent work as its crimes, and the
+    noise was read as the gate working.
+
+    The answer is not `...` in the diff. Three-dot syntax fixes the enumeration and
+    leaves check A and check B reading their blobs at the branch tip, so the list of
+    files and the content behind them disagree about which commit "base" is - the same
+    defect, quieter. Resolve once, here, and hand the ONE commit to the enumeration and
+    to every `git show`.
+
+    Empty stdout raises, and that is not belt-and-braces. `git diff --raw -z "..HEAD"`
+    is not an error to git: it reads the empty side as HEAD, reports no change at all,
+    and exits 0. An unresolvable base would come back as a clean bill of health for a
+    tree nothing had looked at - "could not determine the base" and "nothing changed"
+    sharing a code path, which is the one thing this module exists to prevent.
+
+    The message names fetch depth because git will not. Unrelated histories exit 1 with
+    NOTHING on stderr, so sh_strict's own wording would be "failed (1): no error
+    output" - true, and useless to the person who has to fix it. A shallow checkout is
+    the overwhelmingly likelier cause on a runner: `actions/checkout` defaults to depth
+    1, and one commit per side has no common ancestor to find.
+    """
+    try:
+        out = sh_strict("git", "merge-base", base, head)
+    except GateError as exc:
+        raise GateError(
+            f"could not compute the merge-base of {base} and {head}: {exc}\n"
+            f"The commits have no common history the checkout can see. Almost always a "
+            f"shallow clone - `actions/checkout` defaults to fetch-depth: 1, and the "
+            f"gate needs enough history to find where the branch was cut; set "
+            f"fetch-depth: 0. Failing that, the two really are unrelated histories.") \
+            from exc
+    mb = out.strip()
+    if not mb:
+        raise GateError(
+            f"`git merge-base {base} {head}` succeeded but named no commit. The base "
+            f"cannot be determined, which is not the same as nothing having changed; "
+            f"a checkout without full history (fetch-depth: 0) is the usual cause.")
+    return mb
+
+
 def git_show(rev, path):
     """The content of `path` at `rev`, or None when git could not produce it.
 

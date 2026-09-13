@@ -771,5 +771,117 @@ class TestAddedOwnershipClaims(GateCase):
         self.assertNotIn("Ownership claimed", report)
 
 
+class TestTheBaseIsTheMergeBase(GateCase):
+    """The base sha an event hands the gate is the base BRANCH'S TIP, not the point
+    the pull request branched from. Diffing `base..head` therefore replays every
+    commit the base branch gained since the author branched, in reverse, and attributes
+    it to them: a licence header added on main after they branched is reported as a
+    licence line THEY removed, on a file their pull request never touched. Two blocking
+    failures, neither of them about the contribution. Across a dozen repositories every
+    stale branch showed the base branch's own recent work as its crimes, and the noise
+    was read as the gate working.
+
+    The fix is not `...`. Three-dot syntax fixes the enumeration and leaves every
+    `git show` in check A and check B reading the base branch's tip, so the diff and
+    the blobs disagree about what "base" means - a quieter version of the same bug.
+    The base is resolved once, to the merge-base, and that one commit is what both the
+    enumeration and the blob reads see."""
+
+    def gate(self, base, head):
+        p = subprocess.run(["python3", GATE, base, head],
+                           cwd=self.dir, capture_output=True, text=True)
+        return p.returncode, p.stdout, p.stderr
+
+    def _diverge(self):
+        """A base commit, then a `pr` branch off it. Leaves the checkout on main."""
+        self.write("src/f.js", "const f = 1;\n")
+        self.write("src/g.js", "const g = 1;\n")
+        self.commit("base")
+        self._git("branch", "pr")
+
+    def test_a_header_added_on_the_base_branch_is_not_a_removal_by_the_author(self):
+        self._diverge()
+        self.write("src/f.js", LICENSED + "const f = 1;\n")
+        self.commit("main licenses a file the pull request never touches")
+        self._git("checkout", "-q", "pr")
+        self.write("src/g.js", "const g = 2;\n")
+        self.commit("edit an unrelated file")
+
+        # Assert the topology, or this test can pass for the wrong reason.
+        two_dot = self._git("diff", "--name-only", "main..pr").stdout
+        three_dot = self._git("diff", "--name-only", "main...pr").stdout
+        self.assertIn("src/f.js", two_dot, "the defect needs f.js in the two-dot diff")
+        self.assertNotIn("src/f.js", three_dot, "f.js is not part of the contribution")
+
+        code, report, _err = self.gate("main", "pr")
+        self.assertNotIn("src/f.js", report,
+                         "the base branch's own work must not be reported as the "
+                         "author's removal")
+        self.assertEqual(code, 0, report)
+
+    def test_a_removal_by_the_pull_request_itself_still_blocks(self):
+        self.write("src/f.js", LICENSED + "const f = 1;\n")
+        self.write("src/g.js", "const g = 1;\n")
+        self.commit("base")
+        self._git("branch", "pr")
+        self.write("src/g.js", "const g = 2;\n")
+        self.commit("main moves on")
+        self._git("checkout", "-q", "pr")
+        self.write("src/f.js", "const f = 2;\n")
+        self.commit("drop the header")
+        code, report, _err = self.gate("main", "pr")
+        self.assertEqual(code, 1, report)
+        self.assertIn("removed or altered", report)
+        self.assertIn("src/f.js", report)
+
+    def test_a_file_changed_on_both_branches_is_judged_only_on_the_authors_change(self):
+        """Both sides touch one file, and both touch its HEADER - a licence-shaped
+        change on each end, or the two-dot diff produces nothing check B cares about
+        and the test proves nothing."""
+        self.write("src/shared.js", LICENSED + "const x = 1;\n")
+        self.commit("base")
+        self._git("branch", "pr")
+        self.write("src/shared.js",
+                   LICENSED.replace(" */", " * Copyright (c) 2021 Later Corp\n */")
+                   + "const x = 1;\n")
+        self.commit("main records a second holder")
+        self._git("checkout", "-q", "pr")
+        self.write("src/shared.js",
+                   LICENSED.replace(" */", " * Modified by the Example project.\n */")
+                   + "const x = 2;\n")
+        self.commit("edit, with the notice")
+        code, report, _err = self.gate("main", "pr")
+        self.assertNotIn("Later Corp", report,
+                         "a line the base branch added is not a line the author removed")
+        self.assertEqual(code, 0, report)
+
+    def test_an_uncomputable_merge_base_blocks_rather_than_reporting_a_clean_tree(self):
+        """A shallow checkout - `actions/checkout` defaults to depth 1 - leaves the two
+        commits with no common history, and so does a genuinely unrelated branch. git
+        says so by exiting 1 with NOTHING on stderr, which is indistinguishable from
+        "they have no common ancestor, carry on" unless someone looks. Empty output
+        here would mean an empty diff, every check finding nothing, and a report
+        certifying a tree it never read."""
+        self.write("src/a.js", LICENSED + "const a = 1;\n")
+        self.commit("base")
+        self._git("checkout", "-q", "--orphan", "unrelated")
+        self._git("rm", "-rq", "--cached", ".")
+        self.write("src/b.js", "const b = 1;\n")
+        self.commit("an unrelated history")
+        self.assertNotEqual(self._git("rev-parse", "--verify", "unrelated").returncode, 1,
+                            "the orphan branch must actually carry a commit")
+        self.assertNotEqual(self._git("merge-base", "main", "unrelated").returncode, 0,
+                            "these histories must genuinely have no merge-base")
+
+        code, report, err = self.gate("main", "unrelated")
+        self.assertEqual(code, 2, report + err)
+        self.assertIn("could not run", report)
+        self.assertIn("merge-base", report)
+        self.assertIn("depth", report, "name the likely cause; the operator has to act")
+        self.assertNotIn("Verified automatically", report)
+        self.assertNotIn("Nothing to do", report)
+        self.assertNotIn("Traceback", err)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

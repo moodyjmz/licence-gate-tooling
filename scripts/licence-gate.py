@@ -17,7 +17,7 @@ Writes a markdown report to stdout and exits non-zero if A or B failed.
 import re
 import sys
 
-from git_io import GateError, changed_files, git_show, sh_strict
+from git_io import GateError, changed_files, git_show, merge_base, sh_strict
 from licence_map import (has_licence_header, leading_comment_lines,
                          leading_comment_region)
 
@@ -557,6 +557,15 @@ def main(argv, author=None):
         print(__doc__.strip())
         return 2
     base, head = argv
+    # ONE resolution, before anything reads git, and everything below sees the same
+    # commit: the enumeration here, and every `git show` check A and check B make
+    # against `base`. What arrives is the base BRANCH'S TIP, so diffing it replayed the
+    # base branch's own recent commits in reverse and billed them to the author - a
+    # header added on main after the branch was cut, reported as a header this pull
+    # request removed from a file it never touched. Resolving it in changed_files alone
+    # would fix the file list and leave the blobs at the tip, which is the same defect
+    # with fewer symptoms.
+    base = merge_base(base, head)
     added, modified, deleted, renamed, pairs, gitlinks = changed_files(base, head)
     # A rename is reported INSTEAD of a modification, never alongside it, so a file
     # renamed and edited in one commit never reached check_a - it kept its header,
