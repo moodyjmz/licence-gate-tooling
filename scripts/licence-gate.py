@@ -1,14 +1,20 @@
 #!/usr/bin/env python3
-"""Licence gate: three checks over a PR diff.
+"""Licence gate: a set of checks over a PR diff.
 
   A  a modified file carrying a licence header must also carry a modification notice
   B  no line matching Copyright / Licensed under may be deleted or altered
   C  candidate replacement events, detected and listed for a human to disposition
+  D  new files that need a licence decision
+  E  structured licence declarations - the licence as a FIELD, in the metadata the
+     shipped artefact actually carries, which no prose header matcher can see
+  F  `.gitattributes` changes, which can collapse the very diff being approved
 
-A and B are mechanical and may block. C only ever prompts: it may say "this might be
-a replacement", never "this isn't". A false prompt costs a reviewer seconds; a false
-all-clear is a missing record nobody knows is missing - so C is tuned to over-detect,
-and the reviewer's "not a replacement" is the cheap correction.
+A, B and D are mechanical and may block. C only ever prompts: it may say "this might
+be a replacement", never "this isn't". A false prompt costs a reviewer seconds; a
+false all-clear is a missing record nobody knows is missing - so C is tuned to
+over-detect, and the reviewer's "not a replacement" is the cheap correction. E and F
+feed C rather than blocking: both describe events that are legitimate about as often
+as they are not, so the answer is always a person's.
 
 Usage:  licence-gate.py <base-sha> <head-sha>
 Writes a markdown report to stdout and exits non-zero if A or B failed.
@@ -47,6 +53,7 @@ VENDOR_RE = re.compile(r"^(vendor/|vendors/|third[_-]party/|node_modules/|extern
 # definitions has no definition, and the last time that happened - three answers to
 # "has this file got a header" - a file our own tool stamped became invisible to both
 # blocking checks.
+
 # The files this programme records its own findings in. They are not licensed material
 # and their first line is not a header, whatever it looks like.
 #
@@ -582,6 +589,97 @@ def check_d(head, added, gitlinks=()):
     return needing, assets, links
 
 
+# `.gitattributes` at ANY depth: git reads one per directory, so a nested file governs
+# its own subtree and is exactly as effective at hiding a diff as the root one.
+GITATTRIBUTES_RE = re.compile(r"(^|/)\.gitattributes$")
+
+# Attributes that stop a reviewer seeing the diff they are approving. `linguist-*`
+# makes GitHub collapse the file's diff by default; `-diff` and `binary` are stronger
+# still - there is no textual diff rendered at all.
+_DIFF_HIDING_ATTRS = ("linguist-generated", "linguist-vendored", "-diff", "binary")
+
+# `pattern attr attr ...`, with the pattern optionally quoted because git allows a
+# space in it. Getting the pattern wrong would name the wrong file in the finding.
+_ATTR_LINE_RE = re.compile(r'^("(?:[^"\\]|\\.)*"|\S+)\s*(.*)$')
+
+
+def _attribute_lines(text):
+    """(pattern, attributes, raw) for each real line. Comments and blanks dropped."""
+    out = []
+    for line in (text or "").split("\n"):
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        m = _ATTR_LINE_RE.match(stripped)
+        if m:
+            out.append((m.group(1), m.group(2).split(), stripped))
+    return out
+
+
+def _blob_or_empty(rev, path, is_link, what):
+    """The blob at one end, or "" where that end has none. End-by-end, as check_b."""
+    if path is None or is_link:
+        return ""
+    return read_at(rev, path, what)
+
+
+def check_f(base, head, pairs):
+    """Changes to `.gitattributes`. Returns [(path, reason)].
+
+    THE ATTACK THIS ANSWERS: marking a path `linguist-generated` makes GitHub collapse
+    that file's diff by default in the pull request view. A contributor can hide the
+    very change a reviewer is about to approve - and the gate's own finding would go on
+    naming a path the reviewer never actually looks at, which is worse than saying
+    nothing, because the reviewer believes they have read it.
+
+    The path already reached a human: `.gitattributes` matches neither SOURCE_RE nor
+    TEXT_RE, so `is_asset` raised it as "asset modified". That was never the gap. "Asset
+    modified" does not tell a reviewer that a diff below is collapsed, and it is the
+    mechanism, not the path, that they need.
+
+    A CANDIDATE, NEVER A BLOCK. Marking a genuinely generated file is an ordinary thing
+    to do, and whether this one is generated is a judgement. Blocking it would also be
+    unresolvable for the legitimate case.
+
+    THE WORDING IS ONLY AS STRONG AS WHAT WAS ESTABLISHED. A `.gitattributes` change
+    that hides no diff still raises a candidate - the file decides how every diff in
+    the repository renders - but it does not claim a diff was hidden. Note that
+    REMOVING `linguist-generated` also lands here as an ordinary change, which is
+    correct: un-collapsing a diff is not an attack, and saying "a diff may be
+    collapsed" about it would be false.
+    """
+    findings = []
+    for old_path, new_path, old_is_link, new_is_link in pairs:
+        ends = [p for p in (old_path, new_path) if p]
+        if not any(GITATTRIBUTES_RE.search(p) for p in ends):
+            continue
+        before = _blob_or_empty(base, old_path, old_is_link, "the base version of")
+        after = _blob_or_empty(head, new_path, new_is_link, "the modified file")
+        was = {raw for _, _, raw in _attribute_lines(before)}
+        hiding = [(pat, [a for a in attrs if a in _DIFF_HIDING_ATTRS])
+                  for pat, attrs, raw in _attribute_lines(after)
+                  if raw not in was and any(a in _DIFF_HIDING_ATTRS for a in attrs)]
+        path = new_path or old_path
+        if hiding:
+            named = ", ".join("`{}` is marked `{}`".format(pat, " ".join(attrs))
+                              for pat, attrs in hiding)
+            findings.append((path,
+                             "`.gitattributes` adds or changes a diff-hiding attribute: "
+                             "{}. GitHub COLLAPSES a matching file's diff by default, so "
+                             "a change under that pattern can be approved without ever "
+                             "being displayed. Expand every collapsed diff in this pull "
+                             "request before approving it, and confirm the paths really "
+                             "are generated or vendored. A reviewer other than the "
+                             "author must do this".format(named)))
+        else:
+            findings.append((path,
+                             "`.gitattributes` changed — it decides how every diff in "
+                             "this repository is rendered and which paths GitHub treats "
+                             "as generated. A reviewer other than the author must read "
+                             "the change itself"))
+    return findings
+
+
 def _add_reason(cands, path, why):
     """Add a candidate, MERGING into any entry this path already has.
 
@@ -600,10 +698,10 @@ def _add_reason(cands, path, why):
 
 
 def check_c(added, modified, deleted, renamed, gitlinks=(), binary_skips=(),
-            claims=(), *, declarations):
+            claims=(), *, declarations, attributes):
     """Candidate replacement events. Over-detects by design.
 
-    `declarations` is KEYWORD-ONLY AND HAS NO DEFAULT, deliberately. There are two
+    `declarations` and `attributes` are KEYWORD-ONLY AND HAVE NO DEFAULT, deliberately. There are two
     call sites - the report and `--candidates`, which is what the acknowledgement gate
     reads - and a default would let one of them silently stop requiring answers for
     licence-field changes while the other kept requiring them. A defaulted parameter
@@ -670,7 +768,7 @@ def check_c(added, modified, deleted, renamed, gitlinks=(), binary_skips=(),
                              "so the whole asset needs your decision"))
     # Merged rather than appended: a declaration file may already be here as a deleted
     # path or an asset, and the specific reason is the one worth reading.
-    for path, why in declarations:
+    for path, why in list(declarations) + list(attributes):
         _add_reason(cands, path, why)
     return cands
 
@@ -834,7 +932,8 @@ def main(argv, author=None):
         _, binary_skips, claims, _deleted_headers = check_b(base, head, pairs)
         for p, _ in check_c(added, modified, deleted, renamed, gitlinks,
                             binary_skips, claims,
-                            declarations=check_e(base, head, pairs)):
+                            declarations=check_e(base, head, pairs),
+                            attributes=check_f(base, head, pairs)):
             print(p)
         return 0
 
@@ -852,7 +951,8 @@ def main(argv, author=None):
     b, binary_skips, claims, deleted_headers = check_b(base, head, pairs)
     a = check_a(base, head, modified_for_a, base_paths, gitlinks)
     c = check_c(added, modified, deleted, renamed, gitlinks, binary_skips, claims,
-                declarations=check_e(base, head, pairs))
+                declarations=check_e(base, head, pairs),
+                attributes=check_f(base, head, pairs))
     d_src, d_assets, d_links = check_d(head, added, gitlinks)
 
     out = []

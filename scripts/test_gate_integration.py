@@ -1399,3 +1399,83 @@ class TestStructuredLicenceDeclarations(GateCase):
         self.commit("add a package.json")
         self.assertIn("licence declaration",
                       self.assertClean("a new declaration must be seen"))
+
+
+class TestGitattributesCanHideTheDiffBeingSigned(GateCase):
+    """`linguist-generated` collapses a file's diff in GitHub's pull request view.
+
+    A contributor can therefore hide the change a reviewer is about to approve. The
+    gate already raised `.gitattributes` as a candidate - it matches no source or text
+    pattern, so `is_asset` caught it as "asset modified" - but "asset modified" tells
+    the reviewer nothing about the mechanism, and the finding it prints alongside names
+    a path whose diff GitHub will not show them by default. The path reaching a human
+    was never the gap; the reviewer knowing WHY was.
+
+    A candidate, not a block. Marking a genuinely generated file is a legitimate thing
+    to do, and the question - is this one? - is a human's.
+    """
+
+    def _attributes(self, before, after, path=".gitattributes"):
+        self.write(path, before)
+        self.write("src/app.js", "const x = 1;\n")
+        self.commit("base")
+        self.write(path, after)
+        self.commit("change the attributes")
+
+    def _reason(self, report, path=".gitattributes"):
+        """Every line the report devotes to this path. An added file is named in the
+        "New files" section as well as in the candidates, and both start the same
+        way - taking only the first matched whichever came earlier in the report."""
+        lines = [l for l in report.split("\n") if l.startswith(f"- `{path}` —")]
+        if not lines:
+            self.fail(f"no finding for {path}\n--- gate said ---\n{report}")
+        return "\n".join(lines)
+
+    def test_marking_a_path_generated_names_the_pattern_and_the_effect(self):
+        self._attributes("* text=auto\n",
+                         "* text=auto\nsrc/payroll.js linguist-generated\n")
+        reason = self._reason(self.assertClean("attributes must not block"))
+        self.assertIn("linguist-generated", reason)
+        self.assertIn("src/payroll.js", reason)
+        self.assertIn("collapsed", reason)
+
+    def test_marking_a_path_vendored_is_reported_the_same_way(self):
+        self._attributes("* text=auto\n",
+                         "* text=auto\nsrc/vendor-ish/** linguist-vendored\n")
+        reason = self._reason(self.assertClean("attributes must not block"))
+        self.assertIn("linguist-vendored", reason)
+        self.assertIn("src/vendor-ish/**", reason)
+
+    def test_suppressing_the_diff_outright_is_reported_too(self):
+        """`-diff` and `binary` hide a diff harder than linguist does: GitHub shows
+        no textual diff at all rather than a collapsed one."""
+        self._attributes("* text=auto\n", "* text=auto\nsrc/payroll.js -diff\n")
+        reason = self._reason(self.assertClean("attributes must not block"))
+        self.assertIn("src/payroll.js", reason)
+        self.assertIn("collapsed", reason)
+
+    def test_a_nested_gitattributes_is_not_missed(self):
+        self._attributes("* text=auto\n",
+                         "* text=auto\nledger.js linguist-generated\n",
+                         path="src/deep/.gitattributes")
+        reason = self._reason(self.assertClean("attributes must not block"),
+                              "src/deep/.gitattributes")
+        self.assertIn("linguist-generated", reason)
+
+    def test_an_ordinary_attributes_change_still_raises_a_candidate(self):
+        """Without the diff-hiding wording, which would be a claim this run did not
+        establish. The file still reaches a human - it decides how every diff in the
+        repository is rendered."""
+        self._attributes("* text=auto\n", "* text=auto\n*.md diff=markdown\n")
+        reason = self._reason(self.assertClean("attributes must not block"))
+        self.assertIn("`.gitattributes`", reason)
+        self.assertNotIn("collapsed", reason,
+                         "do not assert a diff is hidden when nothing hides one")
+
+    def test_a_new_gitattributes_marking_a_path_generated_is_seen(self):
+        self._git("commit", "-q", "--allow-empty", "-m", "base")
+        self.write(".gitattributes", "src/payroll.js linguist-generated\n")
+        self.commit("add attributes")
+        reason = self._reason(self.assertClean("a new attributes file must not block"))
+        self.assertIn("linguist-generated", reason)
+        self.assertIn("src/payroll.js", reason)
