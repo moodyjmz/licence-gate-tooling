@@ -558,6 +558,11 @@ class TestTheAppendOnlySeam(RepoCase):
 
         p = subprocess.run(["python3", GATE, "HEAD~1", "HEAD"],
                            cwd=self.dir, capture_output=True, text=True)
+        # Assert the gate RAN first. `assertNotIn` on an empty string passes
+        # cheerfully, so a gate that died on a traceback would certify this seam
+        # exactly the way an empty `git show` used to certify a clean tree.
+        self.assertIn(p.returncode, (0, 1), f"the gate did not run: {p.stderr}")
+        self.assertTrue(p.stdout.strip(), f"the gate produced no report: {p.stderr}")
         self.assertNotIn("append-only", p.stdout,
                          f"the generator's own output must pass the gate\n{p.stdout}")
 
