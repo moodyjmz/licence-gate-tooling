@@ -191,15 +191,18 @@ class TestTheSubjectIsTheChangeNotTheCommit(RepoCase):
                    "Rework the settings pane\n\nA paragraph nobody wants in a list.")
         self.assertEqual(self.subjects(), ["Rework the settings pane"])
 
-    def test_an_empty_body_falls_back_to_the_subject_and_says_so(self):
-        self.branch_commit("topic", "src/a.js", "x\n", "wip")
+    def test_an_empty_body_falls_back_to_what_the_merge_brought_in(self):
+        """An entry reading `Merge remote-tracking branch 'origin/topic'` tells a
+        recipient nothing about what was modified, so the raw template is never the
+        answer: the commits behind the merge are."""
+        self.branch_commit("topic", "src/a.js", "x\n", "feat: add the settings pane")
         self.merge("topic", "Merge remote-tracking branch 'origin/topic'")
         code, out, err = self.run_gen()
         self.assertEqual(code, 0)
-        self.assertIn("Merge remote-tracking branch 'origin/topic'", out,
-                      "the subject is all there is; it is still an entry")
-        self.assertIn("empty body", err,
-                      "an entry naming no change must not slip out silently")
+        self.assertEqual(self.subjects(), ["feat: add the settings pane"])
+        self.assertNotIn("Merge remote-tracking branch", out)
+        self.assertIn("no body", err,
+                      "falling back must not happen silently")
 
     def test_a_squash_merge_keeps_its_own_subject(self):
         self.write("src/a.js", "x\n")
@@ -282,6 +285,96 @@ class TestTheScopeFilter(RepoCase):
         self.write("src/a.js", "x\n")
         self.commit("feat: ours", author=("Up Stream", "dev@upstream.example.org"))
         self.assertEqual(self.subjects(), ["feat: ours"])
+
+
+class TestAnEntryMustDescribeTheChange(RepoCase):
+    """`- 2026-09-11  9c22a6c  fix/boo` is a line in a shipped compliance notice that
+    tells its recipient nothing. A branch name is not a description, and neither is
+    git's merge template or an empty string.
+
+    The rule for "merely a branch name" is anchored, not a guess about shape: no
+    whitespace AND equal to the branch the merge subject itself names. A subject with
+    a slash in it is ordinary English and must survive."""
+
+    def setUp(self):
+        super().setUp()
+        self.write("README.md", "base\n")
+        self.baseline = self.commit("feat: base")
+        self.write_config()
+
+    def test_a_body_that_is_only_the_branch_name_is_not_the_entry(self):
+        self.branch_commit("fix/boo", "src/a.js", "x\n", "fix: stop the parser crashing")
+        self.merge("fix/boo", "Merge pull request #34 from owner/fix/boo", "fix/boo")
+        self.assertEqual(self.subjects(), ["fix: stop the parser crashing"])
+
+    def test_a_body_that_is_only_a_plain_branch_name_is_not_the_entry(self):
+        self.branch_commit("topic", "src/a.js", "x\n", "feat: rework the settings pane")
+        self.merge("topic", "Merge branch 'topic'", "topic")
+        self.assertEqual(self.subjects(), ["feat: rework the settings pane"])
+
+    def test_a_real_subject_containing_a_slash_survives(self):
+        """`fix: don't crash on a/b paths` is a legitimate title. Rejecting anything
+        that looks slashy would delete it."""
+        self.branch_commit("fix/boo", "src/a.js", "x\n", "wip")
+        self.merge("fix/boo", "Merge pull request #34 from owner/fix/boo",
+                   "fix: don't crash on a/b paths")
+        self.assertEqual(self.subjects(), ["fix: don't crash on a/b paths"])
+
+    def test_a_single_word_that_is_not_the_branch_survives(self):
+        """The rule is anchored to the branch the subject names, so a one-word title
+        is kept. Guessing from shape alone would throw it away."""
+        self.branch_commit("work/thing", "src/a.js", "x\n", "wip")
+        self.merge("work/thing", "Merge pull request #35 from owner/work/thing",
+                   "Tidying")
+        self.assertEqual(self.subjects(), ["Tidying"])
+
+    def test_several_introduced_subjects_are_listed_and_capped(self):
+        """One entry is one line. Three titles is as much as a reader can use, and the
+        count says there is more - both fixed by the merge's own history, so the line
+        never changes under the append-only rule."""
+        self.on_branch("work/lots", *[(f"src/{i}.js", f"feat: change {i}", None)
+                                      for i in range(5)])
+        self.merge("work/lots", "Merge pull request #36 from owner/work/lots",
+                   "work/lots")
+        self.assertEqual(
+            self.subjects(),
+            ["feat: change 0; feat: change 1; feat: change 2 (+2 more)"])
+
+    def test_a_merge_template_is_never_the_entry(self):
+        """Not in the subject, and not from the introduced side either: a sync merge
+        dragged in by a branch is no more of a description than the outer one."""
+        self.branch_commit("topic", "src/a.js", "x\n", "Merge branch 'elsewhere'")
+        self.merge("topic", "Merge pull request #37 from owner/topic", "topic")
+        self.assertEqual(self.subjects(), ["(no description recorded in the history)"],
+                         "no template, no branch name, and nothing invented either")
+
+    def test_an_octopus_template_is_never_the_entry(self):
+        self.on_branch("a-one", ("src/a.js", "feat: the first thing", None))
+        self.on_branch("b-two", ("src/b.js", "feat: the second thing", None))
+        self.octopus("Merge branches 'a-one' and 'b-two'", None, ["a-one", "b-two"])
+        subjects = self.subjects()
+        self.assertEqual(len(subjects), 1)
+        # Order WITHIN a side is oldest first; between two independent sides it is
+        # git's own traversal, which is fixed for a given repository but not something
+        # this test should pin. What matters is that both sides are named.
+        self.assertEqual(sorted(subjects[0].split("; ")),
+                         ["feat: the first thing", "feat: the second thing"])
+
+    def test_nothing_usable_names_the_problem_rather_than_shrugging(self):
+        """A hard error here would wedge the notice permanently: the cause is a commit
+        message that cannot be changed without rewriting history. So the entry is
+        written, says plainly that it has no description, and the run warns."""
+        self.write("src/a.js", "x\n")
+        ancestor = self.commit("feat: something earlier")
+        self.write("src/b.js", "x\n")
+        self.commit("feat: something later")
+        self.merge_introducing_nothing("Merge branch 'stale'", "stale", ancestor)
+        code, out, err = self.run_gen()
+        self.assertEqual(code, 0, err)
+        self.assertEqual(self.subjects()[-1], "(no description recorded in the history)")
+        self.assertNotIn("stale", "\n".join(self.subjects()),
+                         "the branch name is what must not reach the notice")
+        self.assertIn("cannot say what was modified", err)
 
 
 class TestOwnershipComesFromWhatAMergeIntroduces(RepoCase):

@@ -37,10 +37,16 @@ DEFAULT_CONFIG = os.path.join(
 
 REQUIRED_KEYS = ("upstream", "baseline", "baseline_date", "upstream_authors")
 
-# The three shapes git gives a merge whose real title is in the body. A squash merge
-# is not in this list: its subject IS the title.
+# The shapes git gives a merge whose real title is in the body. A squash merge is not
+# in this list: its subject IS the title.
 MERGE_SUBJECT_RE = re.compile(
-    r"^(?:Merge pull request #\d+ from |Merge branch |Merge remote-tracking branch )")
+    r"^(?:Merge pull request #\d+ from |Merge branch |Merge branches |"
+    r"Merge remote-tracking branch )")
+
+# What an entry says when the history genuinely contains no description of the change.
+# Fixed text: it is written into a file the gate enforces as append-only, so it must
+# never vary between two runs over the same commit.
+NO_DESCRIPTION = "(no description recorded in the history)"
 
 BASELINE_RE = re.compile(
     r"^Forked\s+from\s+(.+?)\s+at\s+([0-9a-fA-F]{7,40})\s*,\s*dated\s+(\d{4}-\d{2}-\d{2})\s*\.\s*$")
@@ -343,7 +349,68 @@ def is_upstream_change(name, email, introduced, patterns):
     return all(is_upstream_author(n, e, patterns) for n, e, _ in introduced)
 
 
-def subject_for(subject, body, sha, warn):
+def branch_names_in(subject):
+    """Every spelling of the branch a merge subject names, lower-cased.
+
+    `Merge pull request #34 from owner/fix/boo` names `owner/fix/boo`, and the branch
+    a human would type is `fix/boo`; `Merge remote-tracking branch 'origin/topic'`
+    names `origin/topic` and `topic`. Both spellings are kept because either can turn
+    up as the body line git's own forms pre-fill.
+    """
+    m = re.match(r"^Merge pull request #\d+ from (\S+)", subject)
+    if m:
+        refs = [m.group(1)]
+    elif MERGE_SUBJECT_RE.match(subject):
+        refs = re.findall(r"'([^']+)'", subject)
+    else:
+        return set()
+    names = set()
+    for ref in refs:
+        names.add(ref.lower())
+        if "/" in ref:
+            names.add(ref.split("/", 1)[1].lower())
+    return names
+
+
+def unusable_because(text, branches):
+    """Why this candidate cannot describe the change, or None when it can.
+
+    THE BRANCH-NAME RULE, stated rather than guessed: a candidate is merely a branch
+    name when it contains NO WHITESPACE and equals a branch the merge subject itself
+    names. Both halves are needed. `fix: don't crash on a/b paths` is an ordinary
+    title with a slash in it, so "looks slashy" would delete real descriptions; and a
+    one-word title like `Tidying` is kept, because nothing in the subject claims it is
+    a ref. Anchoring to the subject is what makes the rule defensible: it recognises
+    the specific thing that happens - the merge form is submitted with the branch name
+    still in the description box - and nothing else.
+
+    A merge template is rejected for the same reason as the branch name. `Merge pull
+    request #19 from owner/thing` in a compliance notice names no change either, and
+    it can arrive from the introduced side as easily as from the subject.
+    """
+    if not text:
+        return "has no body"
+    if MERGE_SUBJECT_RE.match(text):
+        return f"has a body line that is itself a merge template ({text!r})"
+    if not re.search(r"\s", text) and text.lower() in branches:
+        return f"has a body line that is merely the branch name ({text!r})"
+    return None
+
+
+def join_subjects(subjects, cap=3):
+    """Several introduced titles as ONE line, because one entry is one change.
+
+    Three is as much of a list as a reader can use, and the count tells them there is
+    more. Both are fixed by the merge's own history, so the line reads the same on
+    every regeneration - which the append-only rule requires.
+    """
+    head = "; ".join(subjects[:cap])
+    if len(subjects) <= cap:
+        return head
+    return f"{head} (+{len(subjects) - cap} more)"
+
+
+def subject_for(subject, body, introduced, sha, warn):
     """The title of the CHANGE, which is not always the subject of the commit.
 
     A squash merge puts the pull request title in the subject. A true merge commit
@@ -352,20 +419,46 @@ def subject_for(subject, body, sha, warn):
     and reading the subject blindly fills the notice with entries saying "Merge
     branch", which is a notice that technically exists.
 
-    An empty body leaves nothing better than the subject, so the subject is used -
-    but a warning goes to stderr naming the commit, because an entry reading `Merge
-    remote-tracking branch 'origin/main'` is not something that should slip out
-    silently.
+    The body line is not always a title either. Every merge form pre-fills the
+    description with the branch name, so `- 2026-09-11  9c22a6c  fix/boo` is a real
+    line in a real notice, and it tells its recipient nothing. In order:
+
+        1. the first non-empty body line, when it describes something
+        2. the subjects of the commits the merge brought in
+        3. NO_DESCRIPTION, and a warning
+
+    Step 3 is an entry that says so, not a hard error. The cause is a commit message,
+    and a commit message cannot be corrected without rewriting history - so refusing
+    to generate would wedge the notice for good over a line nobody can fix. The entry
+    still has to be there: the date and the commit are the compliance-relevant part,
+    and a reader who wants more can follow the SHA. What it may not do is quietly
+    print a branch name, an empty string or git's template and let that pass for a
+    description.
     """
+    branches = branch_names_in(subject)
     if not MERGE_SUBJECT_RE.match(subject):
-        return subject
-    for line in body.splitlines():
-        if line.strip():
-            return line.strip()
-    warn(f"{sha[:7]}: merge commit with an empty body; falling back to its subject "
-         f"{subject!r}, which names no change. A merge with a written title reads "
-         f"better in the notice.")
-    return subject
+        if subject:
+            return subject
+        warn(f"{sha[:7]}: this commit has an empty subject, so the entry cannot say "
+             f"what was modified. Recorded as {NO_DESCRIPTION}.")
+        return NO_DESCRIPTION
+
+    body_line = next((line.strip() for line in body.splitlines() if line.strip()), "")
+    complaint = unusable_because(body_line, branches)
+    if complaint is None:
+        return body_line
+
+    usable = [s for _, _, s in (introduced or []) if unusable_because(s, branches) is None]
+    if usable:
+        warn(f"{sha[:7]}: this merge {complaint}; describing it with the commit(s) it "
+             f"brought in instead. A merge with a written title reads better in the "
+             f"notice.")
+        return join_subjects(usable)
+
+    warn(f"{sha[:7]}: this merge {complaint}, and the commits it brought in name no "
+         f"change either, so the entry cannot say what was modified. Recorded as "
+         f"{NO_DESCRIPTION}; only a rewritten history could improve it.")
+    return NO_DESCRIPTION
 
 
 def notice_path():
@@ -446,7 +539,8 @@ def collect_entries(baseline_sha, head, patterns, warn):
             continue
         if touches_only_the_notice(full):
             continue
-        entries.append((date, short, subject_for(subject.strip(), body, full, warn)))
+        entries.append(
+            (date, short, subject_for(subject.strip(), body, introduced, full, warn)))
     return entries
 
 
