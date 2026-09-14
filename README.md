@@ -112,6 +112,71 @@ under the name the action is *actually configured to write* — if you override
 check that never reports, which blocks every pull request for ever and gets removed
 by the first person it inconveniences.
 
+## What happens when a pull request arrives
+
+Two required checks run on every push, in parallel and independent: `gate` reports and
+blocks, `acknowledgement-gate` records the reviewer's decisions. Neither pushes to the
+branch; the author applies every fix.
+
+```mermaid
+flowchart TD
+    PR([PR opened, pushed, or reopened])
+    PR --> GATE[gate check]
+    PR --> ACK[acknowledgement-gate check]
+
+    GATE --> REPORT[one report comment:<br>what must happen, then the detail]
+    REPORT --> BLK{any blocking check?<br>A, B, D-source, G}
+    BLK -->|no| GREEN[gate passes]
+    BLK -->|yes| RES[clear the block]
+    RES --> RA[A — comment /auto-fix, apply the patch]
+    RES --> RB[B — restore the licence line by hand]
+    RES --> RD[D — comment /std-licence, or add header by hand]
+    RES --> RG[G — restore register rows, append beneath]
+    RA --> PUSH[author pushes the fix]
+    RB --> PUSH
+    RD --> PUSH
+    RG --> PUSH
+    PUSH --> PR
+
+    ACK --> CAND{replacement candidates?}
+    CAND -->|none| ASUC[status: success]
+    CAND -->|yes| DISP[reviewer, not the author,<br>posts example-log disposition<br>naming the head SHA]
+    DISP --> ASUC
+    DISP -->|author-posted or stale| APEN[status: pending or failure]
+    APEN --> DISP
+
+    GREEN --> MERGE{gate green +<br>acknowledgement-gate success +<br>reviews met}
+    ASUC --> MERGE
+    MERGE -->|yes| DONE([mergeable])
+```
+
+1. **Open or push.** `gate` and `acknowledgement-gate` both run against
+   `merge-base..head`.
+2. **`gate` posts one report comment** — "what has to happen before this merges" first,
+   then the detail. It **blocks** on A (missing modification notice), B (a removed or
+   altered licence line), D (a new source file with no decision), and G (a register row
+   changed); everything else it lists as a **candidate** for a person.
+3. **`acknowledgement-gate` writes a commit status** from the candidate list: `success`
+   when there is nothing to disposition or every candidate has an eligible disposition,
+   `pending` while it waits, `failure` if the author tried to sign off or a disposition
+   is stale or incomplete.
+4. **Clearing a block:** `/auto-fix` for A (the bot posts a patch, the author applies
+   it); restore the line by hand for B; `/std-licence <files>` for D if the files are
+   ours, otherwise add the real header by hand; restore the rows and append for G.
+5. **Dispositioning a candidate:** a reviewer who is not the author copies the
+   `example-log:` block from the report, answers each `path ->` with a register id or
+   `not a replacement`, and posts it. The status re-runs and turns green.
+6. **Every push re-runs both checks and lapses dispositions** — a new head SHA is a new
+   tree, and a disposition names the SHA it was made against, so a sign-off never
+   silently carries over to code nobody signed for.
+7. **Merge** once `gate` is green, the `acknowledgement-gate` status is `success`, and
+   the repository's own review rules are met. Branch protection makes the two checks
+   binding, and `enforce_admins` applies them to everyone, the owner included.
+
+There is deliberately no way to clear a block invisibly. An attributed override — a
+recorded, reviewer-signed clearance for A, B or D, never G — is designed but not yet
+built; see [`docs/override-design.md`](docs/override-design.md).
+
 ## Consuming it
 
 See [`examples/`](examples/) for the four caller workflows. They are thin: trigger,
