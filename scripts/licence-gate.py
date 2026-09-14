@@ -5,16 +5,15 @@
   B  no line matching Copyright / Licensed under may be deleted or altered
   C  candidate replacement events, detected and listed for a human to disposition
   D  new files that need a licence decision
-  E  structured licence declarations - the licence as a FIELD, in the metadata the
-     shipped artefact actually carries, which no prose header matcher can see
+  E  structured licence declarations - the licence as a field, in the metadata the
+     shipped artefact carries, which no prose header matcher can see
   F  `.gitattributes` changes, which can collapse the very diff being approved
 
-A, B and D are mechanical and may block. C only ever prompts: it may say "this might
-be a replacement", never "this isn't". A false prompt costs a reviewer seconds; a
-false all-clear is a missing record nobody knows is missing - so C is tuned to
-over-detect, and the reviewer's "not a replacement" is the cheap correction. E and F
-feed C rather than blocking: both describe events that are legitimate about as often
-as they are not, so the answer is always a person's.
+A, B and D are mechanical and may block. C only ever prompts. A false prompt costs a
+reviewer seconds; a false all-clear is a missing record nobody knows is missing, so C
+over-detects and the reviewer's "not a replacement" is the cheap correction. E and F
+feed C rather than blocking: both describe events legitimate about as often as not, so
+the answer is a person's.
 
 Usage:  licence-gate.py <base-sha> <head-sha>
 Writes a markdown report to stdout and exits non-zero if A or B failed.
@@ -33,49 +32,33 @@ NOTICE = "Modified by the Example project."
 # Tooling and documentation discuss licences without being licensed material.
 IGNORE_RE = re.compile(r"^(scripts/|\.github/|README\.md$|docs?/)")
 # Third-party trees we carry but do not maintain. Their headers are upstream's, not
-# ours, so the two BLOCKING checks do not apply to them - and applying them was not a
-# theoretical problem. An ordinary dependency bump rewrites vendored files, which
-# removes upstream's old copyright line and adds their new one, and the gate blocked
-# with two instructions nobody could follow: "restore the licence line" (upstream
-# changed their own year, legitimately) and "add the modification notice" (we did not
-# modify it, upstream did). The pull request was opened by a bot that cannot answer
-# either, so the only way out was a human overriding the gate - which teaches everyone
-# that overriding the gate is a normal thing to do.
+# ours, so the two blocking checks do not apply. A dependency bump legitimately
+# rewrites vendored files - removing upstream's old copyright line, adding their new
+# one - and blocking it gave two instructions nobody could follow ("restore the licence
+# line"; "add the modification notice") on a bot-opened PR that can answer neither.
+# Blocking routine third-party work just forces an admin force-push - the only way past
+# a block today - which records nothing about who decided or why.
 #
-# They are NOT ignored, though. A change under here is a third-party version landing
-# in our tree, which is the single most interesting thing a reviewer could be told
-# about, so check_c always raises it. Same routing as binaries: out of the blocking
-# path, into the human one.
+# Not ignored, though: a change here is a third-party version landing in our tree,
+# which is exactly what a reviewer wants told, so check_c always raises it - out of the
+# blocking path, into the human one, same as binaries.
 VENDOR_RE = re.compile(r"^(vendor/|vendors/|third[_-]party/|node_modules/|external/)")
-# SOURCE_RE is imported from licence_map, not declared here. There were two, and they
-# disagreed: licence_map counted `.html` as source, so /std-licence would stamp a
-# header into one, while this file counted the same path as an asset. A term with two
-# definitions has no definition, and the last time that happened - three answers to
-# "has this file got a header" - a file our own tool stamped became invisible to both
-# blocking checks.
+# SOURCE_RE is imported from licence_map, not declared here. There were two and they
+# disagreed - licence_map counted `.html` as source, this file as an asset - and a term
+# with two definitions has none: the last time "has this file got a header" had three
+# answers, a file our own tool stamped became invisible to both blocking checks.
 
-# The files this programme records its own findings in. They are not licensed material
-# and their first line is not a header, whatever it looks like.
+# The files this programme records its own findings in. They are not licensed material,
+# and their first line only looks like a header. `leading_comment_lines` reads a
+# Markdown `#` heading as a line comment, so a MODIFICATIONS.md opening `# Modifications
+# - licensed under the GNU AGPL v3` read as a licence header to check A, and rows naming
+# a holder match NAMED_COPYRIGHT_RE - so writing the record the gate asks for was
+# blocked by the gate that asked for it.
 #
-# It looks like one. `leading_comment_lines` reads a Markdown `#` heading as a line
-# comment, so a MODIFICATIONS.md opening `# Modifications - licensed under the GNU AGPL
-# v3` carried a licence header as far as check A was concerned, and appending an entry
-# demanded a modification notice inside the notice file itself. Rows naming a copyright
-# holder match NAMED_COPYRIGHT_RE as well, so editing one read as altering a licence
-# line and adding one read as an ownership claim. Writing the record the gate asks for
-# was blocked by the gate that asked for it.
-#
-# NOT ADDED TO IGNORE_RE, and that distinction is the whole design. IGNORE_RE drops a
-# path out of the gate's sight, which would make deleting previously-recorded rows
-# invisible - a worse defect than the one being fixed, and precisely the wrong one for
-# an append-only record. These paths stay in every list the gate builds and still reach
-# check_c; they are excluded from the HEADER logic of checks A and B and from nothing
-# else.
-#
-# Append-only IS enforced, by check_g, and it blocks. The exclusion above removes these
-# paths from the HEADER logic and nothing else; without a content check of their own
-# that left them with no check at all, which for an append-only record is the whole
-# point of the record. See check_g for why it blocks rather than prompting.
+# Not added to IGNORE_RE: that would drop the path out of sight and make deleting
+# recorded rows invisible, the wrong failure for an append-only record. These paths stay
+# in every list and still reach check_c; they are excluded from the header logic of A
+# and B and nothing else. Append-only is enforced by check_g, which blocks.
 NOTICE_FILE_RE = re.compile(r"(^|/)(MODIFICATIONS|REPLACEMENTLOG)\.md$", re.I)
 # Text that is not licensed material in its own right and is not a replaceable asset.
 TEXT_RE = re.compile(r"\.(md|txt|json|ya?ml|toml|ini|cfg|lock)$|^[^.]+$", re.I)
@@ -84,96 +67,78 @@ TEXT_RE = re.compile(r"\.(md|txt|json|ya?ml|toml|ini|cfg|lock)$|^[^.]+$", re.I)
 def is_asset(path):
     """Anything that is neither source nor plain text is treated as an asset.
 
-    This used to be a list of extensions - svg, png, ico, woff, ttf and so on - which
-    fails by omission every time somebody invents a file format. `.otf` and `.webp`
-    were both missing, so a font swap and an image swap were neither assets nor
-    source: they fell through every check and the gate reported "no replacement
-    candidates detected", in green, on two new third-party binaries.
-
-    Inverted, the failure mode moves to the safe side. An unrecognised extension now
-    raises a candidate a reviewer dismisses in seconds, rather than passing silently.
+    An extension allow-list fails by omission on every new format: `.otf` and `.webp`
+    were both missing, so a font swap and an image swap fell through every check and the
+    gate reported "no replacement candidates detected" on two new third-party binaries.
+    Inverting it moves the failure to the safe side - an unrecognised extension raises a
+    candidate a reviewer dismisses in seconds rather than passing silently.
     """
     return not (SOURCE_RE.search(path) or TEXT_RE.search(path))
 
 
 def needs_provenance(path):
-    """True when a NEWLY ADDED path needs a human to say where it came from.
+    """True when a newly added path needs a human to say where it came from.
 
-    is_asset() plus the extensionless case, which fell off the end of check_d with no
-    branch taken at all. TEXT_RE's `^[^.]+$` classifies a path with no extension as
-    plain text, so `VENDORTOOL` was not an asset, did not match SOURCE_RE, and was
-    therefore never listed as needing a decision, never raised as a candidate, and
-    never even mentioned under "not checked". A newly added dotless binary - a
-    vendored tool, a font renamed without its suffix - was simply invisible. That is
-    a false all-clear on unrecorded third-party content, which is the one thing this
-    tool exists to prevent.
+    is_asset() plus the extensionless case, which fell off check_d with no branch taken.
+    TEXT_RE's `^[^.]+$` classifies a dotless path as plain text, so `VENDORTOOL` was not
+    an asset, did not match SOURCE_RE, and was never listed as needing a decision nor
+    raised as a candidate - a dotless vendored binary was invisible, a false all-clear
+    on unrecorded third-party content.
 
-    Routed to the asset path rather than the blocking path, because that is the safe
-    and resolvable direction: there may be nowhere to put a header in it, so blocking
-    would be unresolvable, while a candidate costs a reviewer one line of "not a
-    replacement". No carve-out for `LICENSE` or `Makefile`. A fresh allow-list of
-    known-harmless names is the same shape as the extension allow-list this file
-    already threw out for failing by omission, and a LICENSE file appearing in a
-    licence-compliance repository is a thing a person should look at anyway.
+    Routed to the asset path, not the blocking one: there may be nowhere to put a header
+    in it, so blocking would be unresolvable, while a candidate costs a reviewer one
+    line. No carve-out for `LICENSE` or `Makefile` - a name allow-list fails by omission
+    the same way the extension one did, and a LICENSE file in a licence-compliance repo
+    is worth a look anyway.
 
-    Scoped to ADDITIONS. An extensionless file that is merely modified is not
-    invisible - check_a and check_b both read it - so widening is_asset() itself would
-    only add a candidate on every edit of a Makefile, and a gate that prompts on
-    routine edits is a gate people learn to click past.
-
-    Tested on the BASENAME, not the whole path. `^[^.]+$` fails on `src/v1.2/tool`,
-    which has a dot in a directory name and still no extension.
+    Scoped to additions. A merely-modified extensionless file is not invisible (check_a
+    and check_b read it), so widening is_asset() would only add a candidate on every
+    Makefile edit. Tested on the basename: `^[^.]+$` fails on `src/v1.2/tool`, a dot in
+    a directory and no extension.
     """
     return is_asset(path) or "." not in path.rsplit("/", 1)[-1]
 
 
 def both_ends_ignorable(old_path, new_path):
-    """True when EVERY end of a change is a path whose licence text we do not track.
+    """True when every end of a change is a path whose licence text we do not track.
 
     Ignoring on the new path alone let a rename launder an edit: move a licensed file
-    into docs/ in the same commit that rewrites its copyright holder, and the removed
-    line is skipped as documentation.
+    into docs/ in the commit that rewrites its copyright holder, and the removed line is
+    skipped as documentation.
     """
     ends = [p for p in (old_path, new_path) if p]
     return bool(ends) and all(IGNORE_RE.match(p) for p in ends)
 
 
 def both_ends_notice_files(old_path, new_path):
-    """True when EVERY end of a change is one of the record files.
+    """True when every end of a change is one of the record files.
 
-    Same shape as both_ends_ignorable, for the same reason: testing the new path alone
-    would let a rename launder an edit. Renaming a licensed source file to
-    MODIFICATIONS.md in the commit that guts its header must not buy an exemption from
-    the check that would have caught it.
+    Same shape and reason as both_ends_ignorable: testing the new path alone would let a
+    rename launder an edit. Renaming a licensed source file to MODIFICATIONS.md in the
+    commit that guts its header must not buy an exemption.
     """
     ends = [p for p in (old_path, new_path) if p]
     return bool(ends) and all(NOTICE_FILE_RE.search(p) for p in ends)
 
 
-# git's own window. `git diff` decides whether a blob is binary by looking for a NUL
-# in the first 8000 bytes and nowhere else, so a NUL at offset 40000 is text to git.
-# Scanning the whole blob instead put the gate and git into disagreement about what a
-# file IS, in the direction that stops the gate checking: one NUL appended to the end
-# of an ordinary .js file made it binary to us, text to everyone else, and skipped.
+# git's own window. `git diff` decides binary by looking for a NUL in the first 8000
+# bytes and nowhere else, so a NUL at offset 40000 is text to git. Scanning the whole
+# blob put the gate and git into disagreement in the direction that stops the gate
+# checking: one NUL on the end of a .js file made it binary to us, text to git, skipped.
 _BINARY_WINDOW = 8000
 
 
 def looks_binary(text):
     """Whether this blob is bytes rather than lines, decided the way git decides it.
 
-    A NUL byte is the test git itself uses, and it is the one that matters: text files
-    do not contain them. U+FFFD is counted too because blobs are read with
-    errors="replace", so undecodable bytes arrive as replacement characters rather
-    than as an exception - a run of those is a binary that decoded quietly.
+    A NUL byte is git's own test - text files do not contain them. U+FFFD counts too:
+    blobs are read with errors="replace", so undecodable bytes arrive as replacement
+    characters, and a run of them is a binary that decoded quietly. Both tests are
+    confined to the leading window, measured on decoded text - a multi-byte character
+    makes it slightly generous, which is the safe direction.
 
-    Both tests are confined to the leading window, and the window is measured on the
-    decoded text rather than on raw bytes, which is the closest this side of the decode
-    can get to git's rule. A multi-byte character makes the window slightly generous;
-    being generous about how much of the file is inspected is the safe direction.
-
-    THIS PREDICATE DOES NOT DECIDE ANYTHING ON ITS OWN. One end of a change looking
-    binary is not grounds for skipping the line checks - see check_b, where both ends
-    have to look binary before anything is routed away from them.
+    Does not decide anything alone: one end looking binary is not grounds to skip the
+    line checks - see check_b, where both ends must look binary first.
     """
     window = text[:_BINARY_WINDOW]
     if "\x00" in window:
@@ -185,13 +150,10 @@ def resolve(rev):
     """A ref as its commit SHA.
 
     The disposition block prints this for the reviewer to copy, and the acknowledgement
-    gate compares what they wrote against the head SHA. Printing the ref verbatim meant
-    a caller passing a branch name put a branch name in the block: the reviewer would
-    follow the instructions exactly and be told, for ever, that their disposition did
-    not name the current head.
-
-    Falls back to the input if git cannot resolve it. A slightly wrong line in a report
-    is better than a report that does not appear.
+    gate compares what they wrote against the head SHA. Printing the ref verbatim let a
+    caller's branch name into the block, so the reviewer would copy it exactly and be
+    told their disposition did not name the current head. Falls back to the input if git
+    cannot resolve it - a slightly wrong line beats a report that does not appear.
     """
     try:
         return sh_strict("git", "rev-parse", rev).strip() or rev
@@ -205,97 +167,60 @@ def check_b(base, head, pairs):
     `pairs` is [(old_path, new_path, old_is_gitlink, new_is_gitlink)] taken from git's
     own file enumeration, modes included.
 
-    NOTHING HERE PARSES DIFF TEXT, and that is the point. Two of the defects found in
-    this file existed only because it used to read structure off `git diff` output:
+    Nothing here parses diff text, deliberately. Two defects existed only because this
+    used to read structure off `git diff` output:
 
-      * paths were taken from `--- a/…` / `+++ b/…` lines, which can be forged from
-        file CONTENT - a line reading `-- a/docs/decoy` becomes `--- a/docs/decoy`
-        once the removal marker is prepended. Two of those above the real edit
-        repointed the parser at `docs/`, an ignored path, and the copyright rewrite
-        below was skipped: exit 0, with the report stating no copyright line had been
-        altered. It had been; the holder was replaced outright.
-      * then, one layer down, skipping any line starting `---` ate content: a deleted
-        SQL, Lua, Haskell or Ada comment starts `--`, arrives as `--- …`, and was read
-        as a file header. Deleting a copyright line from a .sql file passed.
+      * paths taken from `--- a/` / `+++ b/` lines can be forged from file content - a
+        line reading `-- a/docs/decoy` becomes `--- a/docs/decoy` once the removal
+        marker is prepended. Two of those above the real edit repointed the parser at
+        `docs/`, an ignored path, and the copyright rewrite below was skipped: exit 0,
+        report clean, holder replaced outright.
+      * skipping any line starting `---` ate content: a deleted SQL or Lua comment
+        starts `--`, arrives as `--- ...`, and read as a file header, so deleting a
+        copyright line from a .sql file passed.
 
-    Both were bugs in a hand-rolled state machine over a format whose escaping is not
-    ours to control. The question this check actually answers does not need that
-    format at all, and it is asked TWICE over the same two blobs:
+    The question this answers needs no diff format. It is asked twice over the two
+    blobs, each one `git show` away with no syntax on top:
 
-      * does every header-shaped line in the base blob still appear somewhere in the
+      * does every header-shaped line in the base blob still appear anywhere in the
         head blob?
-      * does every header-shaped line that was in the base blob's LEADING COMMENT
-        REGION still appear in the head blob's leading comment region?
+      * does every header-shaped line in the base blob's leading comment region still
+        appear in the head blob's leading comment region?
 
-    Both blobs are one `git show` away, and neither has any syntax layered on top of
-    it. A parser that does not exist has no parsing bugs.
+    The second question exists because prominence is positional. Move an upstream
+    copyright line out of the leading comment block into a template string at the
+    bottom, byte-identical, and whole-file membership still passes - but AGPL 5(a)
+    requires a prominent notice, and an attribution demoted to program data is destroyed
+    however many bytes survive. A whole-file set cannot express that, so the region is
+    asked separately. The region is `licence_map.leading_comment_region` - the same
+    definition check_a and apply_fix use, imported, not re-derived.
 
-    THE SECOND QUESTION EXISTS BECAUSE PROMINENCE IS POSITIONAL. Membership over the
-    whole blob was once described here as a bounded narrowing - "the line is still
-    literally present in the file, byte for byte" - and that rationale was wrong. Take
-    a file carrying an upstream copyright line and a first-party one, move the upstream
-    line out of the leading comment block into a template string at the bottom of the
-    file, byte-identical, and the gate answered "Nothing to do - both checks pass"
-    while certifying that no copyright line had been deleted or altered. AGPL 5(a)
-    requires a PROMINENT notice; an attribution demoted to program data is destroyed
-    however many of its bytes survive. A set over the whole file cannot express that,
-    so the region is asked about separately.
+    Removal from the region is the finding, and only removal: a line moving into the
+    region loses no prominence, and reordering within it changes no membership. Comparison
+    is exact, not stripped - a whitespace-only change reads as "deleted", a false positive
+    in the safe direction; stripping would let a whitespace-altered line read as unchanged.
 
-    The region is `licence_map.leading_comment_region` - the same definition check_a
-    and apply_fix use, imported, not re-derived. Three disagreeing definitions of "the
-    header region" is how a file became invisible to every check once already.
+    Binary blobs are routed to the reviewer, not blocked. A TrueType `name` table carries
+    `Copyright (c) 2011 Example Foundry` as ASCII, which survives the tolerant decode, so a
+    font swap would block here with advice ("restore the original line exactly") nobody can
+    follow inside a .woff2. A binary has no lines anyone edits; its embedded copyright
+    changed because the whole asset was replaced, which "this asset changed" already says in
+    a form a reviewer can act on. This is routing, not narrowing, and only safe because of
+    the guarantee below: every binary skipped here is raised as a candidate by check_c,
+    whatever its extension, so `binary_skips` is returned and fed to check_c rather than
+    trusting the two to agree. A deleted binary is not in that list and need not be - the
+    deletion branch runs first, and check_c's `for p in deleted` loop raises it. Pinned by a
+    test, because "covered by the other branch" is the sentence before a file is covered by
+    neither.
 
-    REMOVAL FROM THE REGION IS THE FINDING, and only that. A line moving INTO the
-    region has lost no prominence and is not reported; reordering WITHIN the region
-    changes no membership and is not reported either (whether relative order inside a
-    header carries meaning is a separate question, deliberately not answered here).
-
-    THE REMAINING TRADE-OFF, stated because it is a real one: a line whose whitespace
-    changed reads as "deleted" rather than "changed", since membership is on exact
-    text. That is a false positive, which is the direction this tool has chosen
-    everywhere else. Comparison is exact, NOT stripped: stripping would make a
-    whitespace-altered line read as unchanged, which is narrowing detection to make
-    something pass.
-
-    BINARY BLOBS ARE ROUTED TO THE REVIEWER, NOT BLOCKED HERE. Removing the diff
-    parser meant binaries started reaching this check - `git diff` used to say
-    `Binary files … differ` - and a TrueType `name` table carries
-    `Copyright (c) 2011 Example Foundry` as plain ASCII, which survives the tolerant
-    decode. So a font swap blocked here, with advice ("restore the original line
-    exactly") that cannot be followed inside a .woff2.
-
-    This check answers "was a LINE removed or edited". A binary has no lines anyone
-    edits: its embedded copyright changes because the whole asset was replaced, which
-    is a different event with a different remedy. Reporting it here adds nothing that
-    "this asset changed" did not already say, and says it in a form nobody can act on
-    - which is how a gate gets switched off.
-
-    So this is ROUTING, not narrowing, and it is routing only because of the guarantee
-    below: every binary skipped here is raised as a candidate by check_c, whatever its
-    extension, and a reviewer must disposition it. If that guarantee ever stops
-    holding, this becomes a hole. `binary_skips` is returned for exactly that reason -
-    the caller feeds it to check_c rather than trusting the two to agree.
-
-    A DELETED binary is not in that list, and does not need to be. The deletion branch
-    runs first, so a `git rm` on a font never reaches the binary test; check_c's
-    `for p in deleted` loop raises it, which is the same guarantee by a different
-    route. Pinned by a test, because "it is covered by the other branch" is exactly the
-    sentence that precedes a file being covered by neither.
-
-    BOTH ENDS, and only both. Testing the base blob alone gave a two-step attack whose
-    every step was green: step one adds a comment full of undecodable bytes to a .js
-    file - "Nothing to do"; step two deletes the upstream licence header and removes
-    the fixture, whereupon check_b read the base as binary, skipped it, and emitted a
-    non-blocking candidate reading "no line-level check is possible". The head was an
-    ordinary text file. The check was entirely possible, the licence line was gone, and
-    the stated reason was the attacker's cover story.
-
-    A path that looks binary at exactly ONE end is a blocking case, not a routed one:
-    something with lines is becoming something without them, or the reverse, and either
-    is a question about licence text that the line comparison can actually answer. It
-    is also the direction that over-reports, which is the direction this tool takes
-    everywhere. Only when neither end has lines is "no line-level check is possible"
-    a true sentence, and the reason string is only emitted where it is true.
+    Both ends, and only both. Testing the base alone gave a two-step attack, every step
+    green: step one adds a comment of undecodable bytes to a .js file ("Nothing to do");
+    step two deletes the licence header and the fixture, so check_b reads the base as binary,
+    skips it, and emits "no line-level check is possible" - while the head is ordinary text,
+    the check was possible, and the licence line is gone. A path binary at exactly one end
+    still blocks: one side has lines, so the comparison can run, and it over-reports, the safe
+    direction. Only when neither end has lines is "no line-level check is possible" true, and
+    the reason is emitted only where it is.
     """
     violations, binary_skips, claims, deleted_headers = [], [], [], []
     for old_path, new_path, old_is_link, new_is_link in pairs:
@@ -307,37 +232,25 @@ def check_b(base, head, pairs):
             continue
         if all(VENDOR_RE.match(e) for e in (old_path, new_path) if e):
             continue
-        # WHICH END has no blob decides what happens, and getting this symmetrical was
-        # a bug caught before it shipped: skipping a pair because the PATH appeared in
-        # the union `gitlinks` set made replacing a licensed file with a submodule
-        # pointer - one path, git calls it T - pass in silence. The base blob is
-        # perfectly readable there; only the head end is a gitlink. That is the
-        # file-to-symlink failure one mode along, and the diff-text version this
-        # replaced caught it, so the symmetrical skip was weaker than the bug.
-        #
-        # Recognised BY MODE throughout, never by watching `git show` fail: that is how
-        # submodules became invisible to every check in the first place.
+        # Which end has no blob decides what happens. Skipping a pair because the path
+        # appeared in the union `gitlinks` set let a licensed file replaced by a submodule
+        # pointer (one path, git calls it T) pass in silence, since the base blob is
+        # readable and only the head end is a gitlink. Recognised by mode throughout,
+        # never by watching `git show` fail - that is how submodules became invisible once.
         if old_path is None or old_is_link:
             # Nothing was here to delete from: a pure addition, or a submodule pointer
             # whose content has never lived in this repository. check_c and check_d
             # raise both for a human.
             continue
         before = read_at(base, old_path, "the base version of")
-        # A WHOLE-FILE DELETION IS A QUESTION, NOT A VIOLATION. These two cases used to
-        # be fused as "no head blob means every line of the base is gone", which is
-        # literally true and produced an instruction nobody can follow: `git rm` on a
-        # licensed file blocked, telling the reader to restore the licence lines by hand
-        # into a file that does not exist. The only exit was an admin bypass, and a gate
-        # that routinely needs bypassing teaches the team that bypassing is normal -
-        # exactly the lesson VENDOR_RE above exists to stop teaching. A rename whose
-        # rewrite falls below git's similarity threshold arrives as delete-plus-add and
-        # walked into the same wall.
-        #
-        # Deletion is the commonest shape of a replacement event, and check_c already
-        # raises every deleted path as a candidate a human must answer, so this routes
-        # rather than narrows: it moves out of the blocking path into the human one.
-        # The guarantee is check_c's `for p in deleted` loop; if that ever stops
-        # holding, this becomes a silent pass.
+        # A whole-file deletion is a question, not a violation. Fusing the two as "no head
+        # blob means every base line is gone" blocked `git rm` on a licensed file with an
+        # instruction nobody can follow - restore the lines into a file that no longer
+        # exists - clearable only by an unattributed admin force-push that records nothing.
+        # A rename below git's similarity threshold arrives as delete-plus-add and hit the
+        # same wall. Deletion is the commonest shape of a replacement, and check_c raises
+        # every deleted path as a candidate, so this routes rather than narrows. The
+        # guarantee is check_c's `for p in deleted` loop; if it stops holding, silent pass.
         if new_path is None:
             # Recorded, though, because the verified box is not allowed to certify what
             # this run did not establish. Saying "no licence or copyright line deleted
@@ -347,17 +260,12 @@ def check_b(base, head, pairs):
             if any(has_licence_header(l) for l in before.split("\n")):
                 deleted_headers.append(old_path)
             continue
-        # A gitlink at the same path is NOT a deletion and still blocks. The entry is
-        # still there, the base blob is perfectly readable, and the remedy - do not
-        # overwrite a licensed file with a submodule pointer - is one a person can
-        # actually carry out. Treating it as "no head blob" is how replacing a licensed
-        # file with a submodule passed in silence once already.
-        #
-        # Binary is decided by CONTENT, not extension - an extension list is what made
-        # .otf and .webp invisible once already - and it is decided at BOTH ENDS. A blob
-        # that looks binary at one end only still has lines at the other, so the line
-        # comparison can run and does; only a change with no lines at either end is
-        # routed to the reviewer instead.
+        # A gitlink at the same path is not a deletion and still blocks: the entry is
+        # there, the base blob is readable, and the remedy - do not overwrite a licensed
+        # file with a submodule pointer - is one a person can carry out. Binary is decided
+        # by content, not extension (an extension list is what made .otf and .webp
+        # invisible), and at both ends: a blob binary at one end has lines at the other, so
+        # the comparison runs; only a change with no lines at either end is routed away.
         if new_is_link:
             # No head blob exists to compare against, so "both ends" cannot be asked.
             # A binary base here is the font-swapped-for-a-submodule case, whose remedy
@@ -388,24 +296,14 @@ def check_b(base, head, pairs):
                 reported.add(line)
                 violations.append((old_path, line.strip()))
 
-        # AND THE OTHER DIRECTION. This check only ever examined removals, so ADDING an
-        # ownership claim was invisible by construction: a pull request could append
-        # `Copyright (c) 2022 Evil Corp / Licensed under the Evil License 6.66` to any
-        # file, carry the modification notice correctly, and be told "Nothing to do -
-        # both checks pass" with the verified box confirming no copyright line had been
-        # altered. Literally true, and useless: nothing was altered because something
-        # was invented.
-        #
-        # Demonstrated end to end by a reviewer, who merged it to main inside an hour.
-        # A red-team run had named the mechanism first and it was judged a documented
-        # limitation, which it was not - "we only report deletions" describes the code,
-        # not the guarantee anyone believes they have.
-        #
-        # Not blocking, deliberately. A contributor adding their own copyright line is
-        # a legitimate thing to do in plenty of projects, and blocking would leave them
-        # no way to say so. It goes to the reviewer, who can. Absent from the base and
-        # present in the head is the whole test; the modification notice does not match
-        # HEADER_RE, so the tool's own additions do not trip it.
+        # And the other direction: examining only removals made adding an ownership claim
+        # invisible. A PR could append `Copyright (c) 2022 Evil Corp / Licensed under the
+        # Evil License 6.66` to any file, carry the notice correctly, and pass with the
+        # verified box confirming nothing was altered - true, because something was invented
+        # rather than altered. Not blocking: a contributor adding their own copyright line
+        # is legitimate, so it goes to the reviewer. Absent from the base and present in the
+        # head is the whole test; the notice does not match HEADER_RE, so the tool's own
+        # additions do not trip it.
         was_there = set(before.split("\n"))
         for line in after.split("\n"):
             if has_licence_header(line) and line not in was_there:
@@ -433,13 +331,12 @@ def read_at(rev, path, what):
 
 
 def _declared_at(rev, path, is_link, what):
-    """The structured declaration at one END of a change, or None if there isn't one.
+    """The structured declaration at one end of a change, or None if there isn't one.
 
-    END-BY-END, exactly as check_b does it, and for the same reason: `git show` cannot
-    produce a blob for a gitlink, so reading both ends unconditionally would turn an
-    ordinary submodule bump into "could not read the modified file" and block the gate
-    on a file that is not a file. A missing path is an addition or a deletion, not a
-    failure.
+    End-by-end, as check_b does it: `git show` cannot produce a blob for a gitlink, so
+    reading both ends unconditionally would turn a submodule bump into "could not read
+    the modified file" and block on a file that is not a file. A missing path is an
+    addition or a deletion, not a failure.
     """
     if path is None or is_link or declaration_kind(path) is None:
         return None
@@ -453,22 +350,14 @@ def _fmt_declaration(values):
 def check_e(base, head, pairs):
     """Changes to a structured licence declaration. Returns [(path, reason)].
 
-    CANDIDATES, NEVER BLOCKING, and that is a decision rather than an oversight. The
-    field is legitimately edited - a package.json is rewritten by every dependency
-    bump, and relicensing genuinely happens - so the question is always "was this
-    meant?", which only a person answers. Blocking a bot that cannot answer is the
-    deadlock VENDOR_RE already exists to avoid.
-
-    THE TWO CASES ARE NOT THE SAME and are not reported the same way. A declaration
-    file merely being TOUCHED raises nothing: the licence field is intact, and this
-    check established that rather than assuming it. The licence field ITSELF changing
-    value raises a candidate naming both values, because that is the event - a
-    relicensing of everything the build ships.
-
-    A FORMAT THAT COULD NOT BE PARSED IS A THIRD CASE, and it raises a candidate too.
-    "No licence field changed" and "this file could not be read as JSON" are not the
-    same answer, and letting them share a code path is the failure this whole
-    programme keeps finding in itself.
+    Candidates, never blocking: the field is legitimately edited - every dependency bump
+    rewrites a package.json, and relicensing happens - so the question is "was this
+    meant?", which only a person answers. Two cases, reported differently. A declaration
+    file merely touched raises nothing, the licence field intact and checked rather than
+    assumed. The field changing value raises a candidate naming both values - a
+    relicensing of everything the build ships. A format that could not be parsed is a
+    third case and raises a candidate too: "no licence field changed" and "could not read
+    as JSON" are different answers and must not share a code path.
     """
     findings = []
     for old_path, new_path, old_is_link, new_is_link in pairs:
@@ -503,59 +392,46 @@ def check_e(base, head, pairs):
 def check_a(base, head, modified, base_paths=None, gitlinks=()):
     """Modified files that have a licence header but no notice.
 
-    The header is looked for in the file's LEADING COMMENT BLOCK, not in a fixed
-    number of lines. A fixed 40-line window was defeated by inserting 45 lines of
-    filler comment above the header: the gate then saw no header, demanded no notice,
-    and told the reviewer in its verified box that every modified file with a header
-    carried one. See licence_map.leading_comment_region for why the whole file is not
-    scanned instead.
+    The header is looked for in the file's leading comment block, not a fixed line
+    count. A 40-line window was defeated by 45 lines of filler comment above the header:
+    the gate then saw no header and demanded no notice. See
+    licence_map.leading_comment_region for why the whole file is not scanned instead.
     """
     missing = []
     for p in modified:
-        # Tooling and documentation are excluded here exactly as they are in check_b
-        # and check_c. Without it, a README whose first line reads "# Copyright (c)
-        # 2020 Example Corp" - an ordinary thing to write - is demanded a modification
-        # notice on every edit, and /auto-fix cannot supply one because a Markdown file
-        # has no comment block to close. That blocks a pull request on a requirement
-        # nothing can satisfy, which is how a gate loses its audience.
+        # Tooling and documentation are excluded, as in check_b and check_c. Otherwise a
+        # README opening "# Copyright (c) 2020 Example Corp" is demanded a notice on every
+        # edit that /auto-fix cannot supply - a Markdown file has no comment block to
+        # close - blocking a PR on a requirement nothing can satisfy.
         if IGNORE_RE.match(p) or VENDOR_RE.match(p):
             continue
-        # A record file's first line is a Markdown heading, not a licence header, and
-        # there is no comment block in Markdown for /auto-fix to close - so demanding a
-        # notice here is a requirement nothing can satisfy, on the one file the
-        # programme exists to have written. See NOTICE_FILE_RE.
+        # A record file's first line is a Markdown heading, not a header, and Markdown has
+        # no comment block for /auto-fix to close - so a notice here is a requirement
+        # nothing can satisfy, on the one file the programme exists to write. See
+        # NOTICE_FILE_RE.
         if NOTICE_FILE_RE.search(p):
             continue
-        # A submodule has no content in this repository, so there is nowhere to put a
-        # notice and nothing to read. It is not silently dropped: check_c and check_d
-        # raise it, which is where "where did this content come from?" belongs.
+        # A submodule has no content here, so nowhere to put a notice and nothing to read.
+        # Not silently dropped: check_c and check_d raise it, which is where "where did
+        # this content come from?" belongs.
         if p in gitlinks:
             continue
         content = read_at(head, p, "the modified file")
-        # Ask the BASE as well as the head. Reading only the head meant one prepended
-        # line of code above an existing header ended the leading comment region before
-        # the header, so the gate decided the file had none and demanded no notice -
-        # a one-line bypass, easier than the 45-line one this replaced. What matters is
-        # whether the file carried a header before the change, and it is the base that
-        # answers that. A header cannot be escaped by being pushed out of view.
-        # A renamed file does not exist at its new path in the base, so ask for the
-        # name it had there.
+        # Ask the base as well as the head. Reading only the head meant one line of code
+        # prepended above an existing header ended the region before it, so the gate
+        # decided the file had none - a one-line bypass. Whether the file carried a header
+        # before the change is what matters, and the base answers that. A renamed file
+        # does not exist at its new path in the base, so ask for the name it had there.
         before = read_at(base, (base_paths or {}).get(p, p), "the base version of")
         had_header = has_licence_header(leading_comment_region(before))
         region_now = leading_comment_region(content)
         has_header_now = has_licence_header(region_now)
-        # THE NOTICE IS LOOKED FOR IN THE REGION, NOT THE FILE. Membership over the
-        # whole blob was satisfied by the string appearing anywhere: inside a literal,
-        # in a test fixture, in a vendored bundle far below. check_b already asks this
-        # as a separate question because prominence is positional - a licence line
-        # demoted from the header into a template string has lost its prominence and
-        # every one of its bytes - and the notice this check exists to demand is
-        # subject to the same rule. Whole-file membership cannot express it.
-        #
-        # NOT A NARROWING: the region is the same `leading_comment_region` check_b and
-        # apply_fix use, and it is where apply_fix puts the notice, so the remedy the
-        # report offers still satisfies the check. A notice the region cannot see is
-        # one a reader at the top of the file cannot see either.
+        # The notice is looked for in the region, not the whole file - whole-blob
+        # membership was satisfied by the string appearing anywhere, inside a literal or a
+        # vendored bundle far below. Prominence is positional (see check_b), and the notice
+        # is subject to the same rule. Not a narrowing: the region is the same
+        # `leading_comment_region` apply_fix writes into, so the remedy still satisfies the
+        # check, and a notice the region cannot see a reader at the top cannot see either.
         if (had_header or has_header_now) and NOTICE not in region_now:
             missing.append(p)
     return missing
@@ -564,51 +440,31 @@ def check_a(base, head, modified, base_paths=None, gitlinks=()):
 def check_d(head, added, gitlinks=()):
     """New files that need a licence decision.
 
-    Deliberately NOT auto-fixable, unlike check A. A modified file always needs the
-    same notice, so a machine can write it. A new file needs a *copyright holder*,
-    and that depends on where the content came from - which no diff can tell you.
+    Not auto-fixable, unlike check A. A modified file always needs the same notice, so a
+    machine can write it; a new file needs a *copyright holder*, which depends on where
+    the content came from - no diff can tell. Stamping new files mechanically is how a
+    vendored third-party asset ends up carrying your copyright: two icons added to a real
+    repository, named as first-party work, were unmodified Google Material Symbols, and
+    "new files get our header" would have asserted copyright over someone else's work.
 
-    Stamping new files mechanically is how a vendored third-party asset ends up
-    carrying your copyright. That is not a hypothetical: two icons added to a real
-    repository, named as though they were first-party work, turned out to be
-    unmodified Google Material Symbols. A rule that "new files get our header"
-    would have asserted copyright over someone else's work, in a compliance
-    programme whose whole purpose is not doing that.
+    Source files block - a header can be added to one. Binary assets do not: there is
+    nowhere to put a header in a .otf, so they raise a candidate the acknowledgement gate
+    makes a reviewer disposition. A submodule is neither, and takes the first branch
+    before any extension is looked at: deciding by extension hid it, since a gitlink named
+    `vendor/thing.py` matched SOURCE_RE and `vendor/thing` matched TEXT_RE's no-extension
+    rule - neither is a file, and the name never had anything to say about it.
 
-    Source files block, because a header can be added to one. Binary assets do not:
-    there is nowhere to put a header in a .otf, so blocking would be unresolvable.
-    They raise a candidate instead, and the acknowledgement gate requires a reviewer
-    to disposition every candidate - which is where "where did this come from?" gets
-    answered by a person.
+    Whose header it is decides the question. A new source file already carrying a header
+    used to produce nothing - not `needs_provenance`, took the SOURCE_RE branch, had a
+    header, appended to no list - so a third-party file added with upstream's header
+    intact, the commonest way vendored code arrives, was invisible here and to check_c's
+    added-loop. The discriminator is the holder, not the presence of a header: a header
+    naming us is a claim the diff shows, a header naming someone else is content that
+    arrived from somewhere, so the first raises nothing and the second a candidate.
+    Asking about every headered new file instead fires on ordinary first-party work.
 
-    A submodule is neither. It carries content this repository does not hold and did
-    not write - the definition of the thing this tool exists to record - and it takes
-    the FIRST branch, before any extension is looked at. Deciding by extension is what
-    hid it: a gitlink named `vendor/thing.py` matched SOURCE_RE, and a gitlink named
-    `vendor/thing` matched TEXT_RE's no-extension rule, so one was read as an empty
-    source file and the other fell through every branch. Neither is a file at all, and
-    the name never had anything to say about it.
-
-    A HEADER IS NOT AN ANSWER, AND WHOSE HEADER IT IS decides which question to ask.
-    A new source file that already carries a header used to produce nothing at all: not
-    `needs_provenance`, so it took the SOURCE_RE branch, had a header, and was appended
-    to no list. A third-party file added with upstream's own header intact - the
-    commonest way vendored code arrives - was invisible here and to check_c's
-    added-loop. That is how a file whose own body said it was copied from a third-party
-    project passed with "Nothing to do", twice, in a live red-team round.
-
-    The discriminator is the holder, not the presence of a header. A header naming us
-    is a claim the author made and the diff shows; a header naming somebody else is
-    content that arrived from somewhere, which is the single most interesting thing a
-    register can record. So the first raises nothing and the second raises a candidate.
-
-    Asking about EVERY headered new file was the alternative, and it is worse: it fires
-    on every first-party file anyone adds, and a gate that prompts on ordinary work is
-    one people learn to click past. Keying on the holder fires rarely and on the right
-    files.
-
-    What this does NOT close, and cannot: a third-party file added carrying OUR header.
-    The claim is false and the diff cannot tell. That is the permanent human part.
+    What this cannot close: a third-party file added carrying *our* header. The claim is
+    false and the diff cannot tell. That is the permanent human part.
     """
     needing, assets, links, foreign = [], [], [], []
     for p in added:
@@ -629,8 +485,8 @@ def check_d(head, added, gitlinks=()):
     return needing, assets, links, foreign
 
 
-# `.gitattributes` at ANY depth: git reads one per directory, so a nested file governs
-# its own subtree and is exactly as effective at hiding a diff as the root one.
+# `.gitattributes` at any depth: git reads one per directory, so a nested file governs
+# its own subtree and hides a diff exactly as well as the root one.
 GITATTRIBUTES_RE = re.compile(r"(^|/)\.gitattributes$")
 
 # Attributes that stop a reviewer seeing the diff they are approving. `linguist-*`
@@ -666,27 +522,23 @@ def _blob_or_empty(rev, path, is_link, what):
 def check_f(base, head, pairs):
     """Changes to `.gitattributes`. Returns [(path, reason)].
 
-    THE ATTACK THIS ANSWERS: marking a path `linguist-generated` makes GitHub collapse
-    that file's diff by default in the pull request view. A contributor can hide the
-    very change a reviewer is about to approve - and the gate's own finding would go on
-    naming a path the reviewer never actually looks at, which is worse than saying
-    nothing, because the reviewer believes they have read it.
+    The attack: marking a path `linguist-generated` makes GitHub collapse that file's
+    diff by default in the PR view, so a contributor can hide the very change a reviewer
+    is about to approve - and a finding naming a path the reviewer never looks at is worse
+    than none, because they believe they read it.
 
     The path already reached a human: `.gitattributes` matches neither SOURCE_RE nor
-    TEXT_RE, so `is_asset` raised it as "asset modified". That was never the gap. "Asset
-    modified" does not tell a reviewer that a diff below is collapsed, and it is the
-    mechanism, not the path, that they need.
+    TEXT_RE, so `is_asset` raised it as "asset modified". That was never the gap - "asset
+    modified" does not tell a reviewer a diff below is collapsed, and it is the mechanism,
+    not the path, they need.
 
-    A CANDIDATE, NEVER A BLOCK. Marking a genuinely generated file is an ordinary thing
-    to do, and whether this one is generated is a judgement. Blocking it would also be
-    unresolvable for the legitimate case.
-
-    THE WORDING IS ONLY AS STRONG AS WHAT WAS ESTABLISHED. A `.gitattributes` change
-    that hides no diff still raises a candidate - the file decides how every diff in
-    the repository renders - but it does not claim a diff was hidden. Note that
-    REMOVING `linguist-generated` also lands here as an ordinary change, which is
-    correct: un-collapsing a diff is not an attack, and saying "a diff may be
-    collapsed" about it would be false.
+    A candidate, never a block: marking a genuinely generated file is ordinary, whether
+    this one is generated is a judgement, and blocking would be unresolvable for the
+    legitimate case. The wording is only as strong as what was established - a
+    `.gitattributes` change that hides no diff still raises a candidate (the file decides
+    how every diff renders) but does not claim one was hidden, and removing
+    `linguist-generated` lands here as an ordinary change, since un-collapsing a diff is
+    not an attack.
     """
     findings = []
     for old_path, new_path, old_is_link, new_is_link in pairs:
@@ -705,7 +557,7 @@ def check_f(base, head, pairs):
                               for pat, attrs in hiding)
             findings.append((path,
                              "`.gitattributes` adds or changes a diff-hiding attribute: "
-                             "{}. GitHub COLLAPSES a matching file's diff by default, so "
+                             "{}. GitHub collapses a matching file's diff by default, so "
                              "a change under that pattern can be approved without ever "
                              "being displayed. Expand every collapsed diff in this pull "
                              "request before approving it, and confirm the paths really "
@@ -721,41 +573,32 @@ def check_f(base, head, pairs):
 
 
 def check_g(base, head, pairs):
-    """The register files are append-only. Returns [(path, reason)]. BLOCKS.
+    """The register files are append-only. Returns [(path, reason)]. Blocks.
 
-    The base blob's content must be a PREFIX of the head blob's, byte for byte. Rows
-    may be added beneath what is already there; nothing already recorded may move,
-    change or disappear.
+    The base blob must be a byte-for-byte prefix of the head blob: rows may be added
+    beneath what is there, nothing already recorded may move, change or disappear.
 
-    WHY THERE WAS NOTHING HERE BEFORE. MODIFICATIONS.md and REPLACEMENTLOG.md were
-    excluded from checks A and B because a Markdown heading reads as a licence header
-    and rows naming a holder read as ownership claims - correct, and it left the two
-    files this programme exists to write with no content check of any kind. Deleting
-    historical entries raised nothing. check_c raising the path said "this file
-    changed", which is true of every pull request that records anything.
+    There was no content check here before. MODIFICATIONS.md and REPLACEMENTLOG.md are
+    excluded from checks A and B (a Markdown heading reads as a header, rows naming a
+    holder as ownership claims), which left the two files this programme exists to write
+    unchecked - deleting historical rows raised nothing but a check_c "this file changed",
+    true of every PR that records anything.
 
-    THIS BLOCKS, and that is a decision. Three reasons, in order of weight:
-      * the remedy is completely mechanical - put the rows back - unlike "restore the
-        licence line" on a vendored bump, which nobody could carry out;
-      * no bot is ever the author of a register edit, so there is no deadlock to walk
-        into;
-      * the register is the artefact. A candidate a reviewer waves through is exactly
-        how a row goes missing, and a missing row is a record nobody knows is missing.
+    This blocks, and always will: the register is the artefact, and a row waved through
+    is a record nobody knows is missing. The attributed override in
+    docs/override-design.md - designed, not yet built - deliberately excludes this check,
+    because the register can never be rewritten, only appended. Blocking strands nobody - the remedy is mechanical, put the rows back, always
+    possible unlike "restore the licence line" on a vendored bump, and no bot authors a
+    register edit. The cost, plainly: a typo fix in an existing row is blocked too, because
+    an append-only record whose rows can be edited is not one; the message says to append a
+    correcting row instead.
 
-    THE COST, stated rather than discovered later: a legitimate typo fix in an existing
-    row is blocked. That is deliberate - an append-only record whose rows can be edited
-    is not one - and the message says what to do instead, because a gate that blocks
-    without a remedy is a gate people route around.
+    A subtler cost: `base` is the merge-base, so a row edited on the base branch and merged
+    in arrives as this PR's change. The remedy still works.
 
-    A SECOND COST, less obvious: `base` is the merge-base, so a row edited ON THE BASE
-    BRANCH and merged into this one arrives as this pull request's change. The remedy
-    still works, but nobody should be surprised by it.
-
-    EITHER END, not both. `both_ends_notice_files` exists to stop a rename laundering a
-    header rewrite, and the mirror image applies here: renaming the register away in
-    the commit that guts it must not buy an exemption from the check that would have
-    caught it. IGNORE_RE is deliberately NOT consulted - a register under docs/ is
-    still the register.
+    Either end, not both: renaming the register away in the commit that guts it must not
+    buy an exemption, the mirror of `both_ends_notice_files`. IGNORE_RE is not consulted -
+    a register under docs/ is still the register.
     """
     violations = []
     for old_path, new_path, old_is_link, new_is_link in pairs:
@@ -776,11 +619,9 @@ def check_g(base, head, pairs):
                and b_lines[common] == a_lines[common]):
             common += 1
         lost = len(b_lines) - common
-        # Reported as a DIVERGENCE POINT, not as a row count. Everything after the
-        # first mismatch is unverifiable, not necessarily deleted - a one-word edit to
-        # the first of ten rows makes the other nine unmatched too. Saying "10 rows
-        # lost" about that would be false, and a finding a reader can disprove in
-        # seconds is a finding they stop believing.
+        # Reported as a divergence point, not a row count: everything after the first
+        # mismatch is unverifiable, not necessarily deleted - a one-word edit to the first
+        # of ten rows leaves the other nine unmatched too, so "10 rows lost" would be false.
         violations.append((old_path,
                            "the register is append-only, and line {} no longer matches "
                            "what was already recorded there ({} recorded line(s) from "
@@ -790,18 +631,13 @@ def check_g(base, head, pairs):
 
 
 def _add_reason(cands, path, why):
-    """Add a candidate, MERGING into any entry this path already has.
+    """Add a candidate, merging into any entry this path already has.
 
-    Not tidiness. The disposition block prints one `path -> ` line per candidate and
-    the reviewer answers each; the same path twice asks them to answer it twice and
-    gives the acknowledgement gate two keys for one file. Appending to the existing
-    reason keeps the specific finding visible - `.gitattributes` raises a bland "asset
-    modified" already, and "asset modified" is not what the reviewer needs to be told.
-
-    THE SPECIFIC REASON LEADS. Merging it onto the end produced `.gitattributes —
-    asset modified; .gitattributes adds or changes a diff-hiding attribute...`, and a
-    reviewer scanning a list of candidates reads "asset modified" and moves on. The
-    finding that earned its own check goes first; the generic one follows as context.
+    The disposition block prints one `path -> ` line per candidate and the reviewer
+    answers each, so the same path twice asks them to answer it twice and gives the
+    acknowledgement gate two keys for one file. The specific reason leads: a reviewer
+    scanning the list reads a leading "asset modified" and moves on, so the finding that
+    earned its own check goes first and the generic one follows as context.
     """
     for i, (p, existing) in enumerate(cands):
         if p == path:
@@ -815,12 +651,11 @@ def check_c(added, modified, deleted, renamed, gitlinks=(), binary_skips=(),
             claims=(), *, declarations, attributes):
     """Candidate replacement events. Over-detects by design.
 
-    `declarations` and `attributes` are KEYWORD-ONLY AND HAVE NO DEFAULT, deliberately. There are two
-    call sites - the report and `--candidates`, which is what the acknowledgement gate
-    reads - and a default would let one of them silently stop requiring answers for
-    licence-field changes while the other kept requiring them. A defaulted parameter
-    is how the two source patterns diverged in the first place; a TypeError is how a
-    forgotten call site announces itself.
+    `declarations` and `attributes` are keyword-only with no default, deliberately. The
+    two call sites - the report and `--candidates`, which the acknowledgement gate reads
+    - would diverge if a default let one silently stop requiring answers for licence-field
+    changes while the other kept requiring them. A TypeError makes a forgotten call site
+    announce itself.
     """
     cands = []
     for old, new in renamed:
@@ -829,27 +664,23 @@ def check_c(added, modified, deleted, renamed, gitlinks=(), binary_skips=(),
         cands.append((p, "file deleted"))
     for p in added:
         # needs_provenance rather than is_asset: an extensionless addition raised no
-        # candidate here either. `and p not in gitlinks` is load-bearing, not tidiness
-        # - the dedup below runs AFTER this loop, so a gitlink admitted here as "asset
-        # added" would suppress the submodule reason string that tells the reviewer
-        # the content is in another repository entirely.
+        # candidate here either. `and p not in gitlinks` is load-bearing - the dedup below
+        # runs after this loop, so a gitlink admitted here as "asset added" would suppress
+        # the submodule reason that tells the reviewer the content is in another repo.
         if needs_provenance(p) and p not in gitlinks:
             cands.append((p, "asset or extensionless file added"))
     for p in modified:
         if is_asset(p) and p not in gitlinks:
             cands.append((p, "asset modified"))
-    # ONE dedup, and the loops inside it run most specific first. `seen` is
-    # first-writer-wins, so the order below is what decides which of several true
-    # reasons the reviewer is actually shown - it is behaviour, not layout. A vendored
-    # submodule qualifies twice over, and "third-party tree changed" sends the reviewer
-    # to read a diff that does not exist in this repository.
+    # One dedup, loops most-specific-first. `seen` is first-writer-wins, so this order
+    # decides which of several true reasons the reviewer is shown - behaviour, not layout.
+    # A vendored submodule qualifies twice, and "third-party tree changed" would send the
+    # reviewer to read a diff that does not exist in this repository.
     seen = {p for p, _ in cands}
-    # Every gitlink, whatever its name and whatever git called the change. A submodule
-    # is a pointer at a tree in another repository, which is unrecorded vendored
-    # content by definition, and a bump silently swaps all of it. It reached no list
-    # and raised no candidate at all, so the acknowledgement gate reported "No
-    # replacement candidates detected" - a false all-clear on the one thing this tool
-    # is for.
+    # Every gitlink, whatever its name and whatever git called the change: a submodule is
+    # a pointer at a tree in another repository, unrecorded vendored content that a bump
+    # silently swaps. It reached no list and raised no candidate, so the acknowledgement
+    # gate reported "No replacement candidates detected" on the one thing this tool is for.
     for p in sorted(gitlinks):
         if p not in seen:
             cands.append((p, "submodule (gitlink) added or changed - its content lives "
@@ -857,7 +688,7 @@ def check_c(added, modified, deleted, renamed, gitlinks=(), binary_skips=(),
             seen.add(p)
     for path, line in claims:
         if path not in seen:
-            cands.append((path, "a NEW ownership or licence claim appears in this file "
+            cands.append((path, "a new ownership or licence claim appears in this file "
                                 "— only a person can say whether it is true"))
             seen.add(path)
     for p in list(added) + list(modified) + list(deleted):
@@ -865,12 +696,11 @@ def check_c(added, modified, deleted, renamed, gitlinks=(), binary_skips=(),
             cands.append((p, "third-party tree changed - upstream content landing in "
                              "our repository, which is a replacement whoever did it"))
             seen.add(p)
-    # check_b skips binary blobs: they have no lines to remove, so a hit there says
-    # nothing that "this asset changed" did not, in a form nobody can act on. That is
-    # only routing rather than narrowing if every one of them reaches a reviewer here,
-    # so the skipped paths are passed in and added explicitly instead of trusting the
-    # extension rules to have covered them. A binary named .js would otherwise be
-    # skipped by check_b and classified as source by check_c, and vanish between them.
+    # check_b skips binary blobs (no lines to remove), which is routing rather than
+    # narrowing only if every one reaches a reviewer here - so the skipped paths are passed
+    # in and added explicitly rather than trusting the extension rules to cover them. A
+    # binary named .js would otherwise be skipped by check_b, classified as source by
+    # check_c, and vanish between them.
     for p in binary_skips:
         if p not in seen:
             cands.append((p, "binary content changed - no line-level check is possible, "
@@ -904,14 +734,13 @@ def insert_notice(lines, region, anchor):
     Returns new lines, or None when the block cannot be closed and guessing would
     be the only alternative. Refusing is reported loudly; writing a guess is not.
 
-    The style is taken from the scanner's record of what the anchor line IS, not
-    re-derived from how it happens to start. Re-deriving it is what corrupted files:
-    the old code looked for a closer ALONE on its own line, and an ordinary header
-    closing on the same line as its last text - ` * Licensed under X */` - matched
-    nothing, fell through to the line-comment branch, whose marker pattern matched the
-    body's leading `*`, and appended the notice AFTER the `*/`. Outside the comment.
-    As a bare statement. `node --check` rejects the result, and /auto-fix holds
-    contents:write and pushed it unreviewed.
+    The style comes from the scanner's record of what the anchor line is, not re-derived
+    from how it starts. Re-deriving corrupted files: the old code looked for a closer
+    alone on its own line, so an ordinary header closing on the same line as its last
+    text (` * Licensed under X */`) matched nothing, fell through to the line-comment
+    branch whose marker matched the body's leading `*`, and appended the notice after the
+    `*/` - outside the comment, as a bare statement. `node --check` rejects that, and
+    /auto-fix used to hold contents:write and push it unreviewed.
     """
     lines = list(lines)
     if anchor.kind == "block":
@@ -967,14 +796,11 @@ def apply_fix(head, paths):
     """Append the notice to each file's existing header block. Add-only.
 
     Returns (fixed, unfixable). The second list matters: this only knew how to insert
-    before a `*/` or `-->`, which are the closing tokens of block comments. Nine of the
-    eleven extensions this tool stamps headers for use LINE comments - # for Python,
-    shell and Ruby, // for JavaScript, C, Java and Go - which have no closing token at
-    all. For every one of those the search fell through, the file was left untouched,
-    and nothing was recorded. The gate blocked the pull request, told the reviewer to
-    run /auto-fix, and /auto-fix then replied "Nothing to auto-fix". A remedy that
-    quietly does nothing is worse than no remedy: the reviewer has been given a reason
-    to stop looking.
+    before a `*/` or `-->`, the closing tokens of block comments, but most extensions this
+    tool stamps use line comments (# for Python/shell/Ruby, // for JS/C/Java/Go) with no
+    closing token. For those the search fell through, the file was left untouched, and
+    /auto-fix replied "Nothing to auto-fix" on a PR the gate had blocked - a remedy that
+    quietly does nothing is worse than none.
     """
     fixed, unfixable = [], []
     for p in paths:
@@ -987,23 +813,20 @@ def apply_fix(head, paths):
         except (OSError, UnicodeDecodeError):
             unfixable.append(p)
             continue
-        # The SAME question check_a asks, of the same region. This tested the whole
-        # file, so a stray notice below the header block - which check_a blocks on,
-        # because prominence is positional - looked to the remedy like a file already
-        # done. It wrote nothing and reported success, and the pull request the gate
-        # had blocked had no way out. A remedy and the check that names it have to
-        # agree on what "already has a notice" means.
+        # The same question check_a asks, of the same region. Testing the whole file let
+        # a stray notice below the header block - which check_a blocks on, prominence
+        # being positional - look already-done, so the remedy wrote nothing and the
+        # blocked PR had no way out. The remedy and the check must agree on what "already
+        # has a notice" means.
         if NOTICE in leading_comment_region(content):
             continue
         lines = content.split("\n")
-        # The anchor must be IN the leading comment region. The old search ran over
-        # `max(region, 40)` lines, so a file whose region holds no header still got
-        # searched 40 lines deep and anchored on whatever looked like one - a licence
-        # line inside a string literal or a heredoc, which is program data, not a
-        # comment. The notice was written into the middle of it and pushed. This is
-        # not narrowing detection: check_a decides whether a file needs a notice, and
-        # a file it flags that this cannot place a notice in is reported unfixable,
-        # loudly, for a human. A remedy may refuse; it may not guess.
+        # The anchor must be in the leading comment region. The old search ran over
+        # `max(region, 40)` lines and anchored on whatever looked like a header - a licence
+        # line inside a string literal or heredoc, program data, not a comment - and wrote
+        # the notice into the middle of it. A file check_a flags that this cannot place a
+        # notice in is reported unfixable, for a human. A remedy may refuse; it may not
+        # guess.
         region = leading_comment_lines(content)
         anchor = next((r for r in region if has_licence_header(lines[r.index])), None)
         fixed_lines = insert_notice(lines, region, anchor) if anchor else None
@@ -1025,31 +848,27 @@ def main(argv, author=None):
         print(__doc__.strip())
         return 2
     base, head = argv
-    # ONE resolution, before anything reads git, and everything below sees the same
-    # commit: the enumeration here, and every `git show` check A and check B make
-    # against `base`. What arrives is the base BRANCH'S TIP, so diffing it replayed the
-    # base branch's own recent commits in reverse and billed them to the author - a
-    # header added on main after the branch was cut, reported as a header this pull
-    # request removed from a file it never touched. Resolving it in changed_files alone
-    # would fix the file list and leave the blobs at the tip, which is the same defect
-    # with fewer symptoms.
+    # One resolution, before anything reads git, so everything below sees the same commit
+    # - the enumeration here and every `git show` checks A and B make against `base`. What
+    # arrives is the base branch's tip, so diffing it replayed the base branch's own recent
+    # commits in reverse and billed them to the author. Resolving it in changed_files alone
+    # would fix the file list and leave the blobs at the tip, the same defect with fewer
+    # symptoms.
     base = merge_base(base, head)
     added, modified, deleted, renamed, pairs, gitlinks = changed_files(base, head)
-    # A rename is reported INSTEAD of a modification, never alongside it, so a file
-    # renamed and edited in one commit never reached check_a - it kept its header,
-    # gained content, needed a notice, and the report said every modified file with a
-    # header carried one.
+    # A rename is reported instead of a modification, never alongside it, so a file
+    # renamed and edited in one commit never reached check_a - it kept its header, gained
+    # content, needed a notice, and the report certified every headered file carried one.
     modified_for_a = modified + [new for _, new in renamed]
     base_paths = {p: p for p in modified}
     base_paths.update({new: old for old, new in renamed})
 
     if candidates_only:
         _, binary_skips, claims, _deleted_headers = check_b(base, head, pairs)
-        # The foreign-header additions belong here too. They were added to the report's
-        # call and not to this one, and the split showed up immediately: the report said
-        # "1 candidate" while the acknowledgement gate, which reads THIS list, demanded
-        # nothing and went green. Two enumerators of the same thing is the defect; until
-        # they are one function, every candidate source goes in both.
+        # The foreign-header additions belong here too. Adding them to the report's call
+        # and not this one split the two: the report said "1 candidate" while the
+        # acknowledgement gate, which reads this list, demanded nothing and went green.
+        # Until the two enumerators are one function, every candidate source goes in both.
         _, _, _, foreign = check_d(head, added, gitlinks)
         for p, _ in check_c(added, modified, deleted, renamed, gitlinks,
                             binary_skips, claims,
@@ -1082,24 +901,16 @@ def main(argv, author=None):
     out = []
     blocking = bool(a or b or d_src or g)
 
-    # WHAT DO I DO NOW. This block exists because the report failed the only test that
-    # matters: the person who built the gate opened a pull request, read the report,
-    # and said "I don't know how to resolve this". Every fact needed was present and
-    # none of it was usable. Three things were wrong, and all three are fixed here.
-    #
-    #   * nothing said what was actually BLOCKING. A section headed "a licence decision
-    #     is needed", carrying its own "How to resolve", sat above a check that had
-    #     already passed - so the reader could not tell which of the two sections was
-    #     the one stopping the merge.
-    #   * advisory and blocking sections were formatted identically, so "you may want
-    #     to" and "this will not merge until" looked exactly alike.
-    #   * the disposition instruction was addressed to whoever was reading, but a
-    #     disposition from the AUTHOR is refused by design. The report told the one
-    #     person reading it to do the one thing they are barred from doing, and never
-    #     mentioned the bar.
-    #
-    # A gate that cannot say what to do next is a gate people route around, and being
-    # routed around looks identical to working.
+    # A "what has to happen" block, up front. The report used to state every fact and
+    # leave the reader unable to act on any of them. Three faults, all fixed here:
+    #   * nothing said what was actually blocking - an advisory section carrying its own
+    #     "How to resolve" sat above a check that had already passed, so the reader could
+    #     not tell which section stopped the merge;
+    #   * advisory and blocking sections were formatted identically, so "you may want to"
+    #     and "this will not merge until" looked alike;
+    #   * the disposition instruction addressed whoever was reading, but a disposition from
+    #     the author is refused by design - it told the one person reading it to do the one
+    #     thing they are barred from, without mentioning the bar.
     todo = []
     if g:
         todo.append(("anyone with write access, the author included",
@@ -1129,7 +940,7 @@ def main(argv, author=None):
     if c:
         subject = ("the candidate below" if len(c) == 1
                    else "every one of the {} candidates below".format(len(c)))
-        todo.append(("a reviewer" + (", NOT @" + author if author else ", not the author"),
+        todo.append(("a reviewer" + (", not @" + author if author else ", not the author"),
                      "answer {}, using the block at the end of this comment".format(subject)))
 
     if todo:
@@ -1139,8 +950,8 @@ def main(argv, author=None):
         out.append("")
         if c and author:
             out.append("> @{} opened this pull request, so a disposition from them is "
-                       "refused — the whole value of the record is that a second person "
-                       "looked. Anyone else with write access can give it.\n".format(author))
+                       "not accepted. Anyone else with write access can give it.\n"
+                       .format(author))
     else:
         out.append("### Nothing to do — both checks pass\n")
         out.append("Anything below is for information and does not block the merge.\n")
@@ -1207,9 +1018,8 @@ def main(argv, author=None):
             out.append(f"- `{p}` — submodule added. Its content is in another repository "
                        f"and is not in this diff: what is it, who wrote it, and under "
                        f"which licence is it being vendored?")
-        out.append("\n`/auto-fix` deliberately will not touch these: the right "
-                   "copyright holder depends on where the content came from, and "
-                   "guessing is how someone else's work ends up carrying yours.\n")
+        out.append("\n`/auto-fix` does not touch new files: the copyright holder depends "
+                   "on the file's origin, which the diff cannot determine.\n")
         if d_src:
             # The report said "by hand" while the command that does it existed and went
             # unmentioned. A tool nobody is told about is a tool nobody uses, and the
@@ -1218,11 +1028,10 @@ def main(argv, author=None):
             out.append("**If these are ours, say so and the headers are applied:** post "
                        "a comment reading\n")
             out.append("```\n/std-licence {}\n```".format(named))
-            out.append("\nThat command is an assertion — *we wrote these* — which is why "
-                       "it names every file rather than taking them all in one sweep, "
-                       "and why a machine cannot issue it. The licence follows from "
-                       "where each file sits in the tree; the copyright line records "
-                       "your word for it.\n")
+            out.append("\nThis command asserts *we wrote these*, so it names each file "
+                       "rather than taking them in one sweep. The licence is derived from "
+                       "the path; the copyright line records your assertion of "
+                       "authorship.\n")
             out.append("If any of them is **not** ours — vendored, copied, generated "
                        "from something else — leave it out and add its real header by "
                        "hand.\n")
@@ -1231,8 +1040,8 @@ def main(argv, author=None):
         out.append("### Ownership claimed — {} new line(s)\n".format(len(claims)))
         out.append("Someone has **added** a copyright or licence statement. Nothing was "
                    "removed, so the checks above have nothing to say about it — but a "
-                   "file now asserts something it did not assert before, and only a "
-                   "person can tell whether that is true.\n")
+                   "file now asserts something it did not before, and a reviewer must "
+                   "confirm it.\n")
         for path, line in claims:
             out.append("- `{}`\n  ```\n  {}\n  ```".format(path, line))
         out.append("\nIf it is right — a contributor recording their own copyright, a "
@@ -1247,21 +1056,17 @@ def main(argv, author=None):
                    "answer, including \"no\".\n")
         for p, why in c:
             out.append(f"- `{p}` — {why}")
-        # Say what to DO first, and only then what it means. This block described its
-        # own purpose - "the commit line is required: it is what ties your signature to
-        # the tree you actually looked at" - which is true, reads as homework, and
-        # never mentions that the line is already filled in. The first person to meet
-        # it asked what a register was and whether they had to go and find the commit.
-        # Neither question should have been possible: there is nothing to look up and
-        # nothing to compose.
+        # Say what to do first, then what it means. This described its own purpose - "the
+        # commit line ties your signature to the tree you looked at" - which reads as
+        # homework and never mentions the line is already filled in. Nothing here needs
+        # looking up or composing.
         out.append("\n**What to do — four steps, nothing to look up:**\n")
         out.append("1. Copy the block below.")
         out.append("2. Paste it into the comment box at the bottom of this pull request.")
         out.append("3. After each `->`, type your answer.")
         out.append("4. Post the comment.\n")
-        out.append("The check re-runs on its own within a minute or so and turns green. "
-                   "You do not need to do anything else, and nobody has to re-run it "
-                   "for you.\n")
+        out.append("The check re-runs automatically within about a minute; nothing else "
+                   "is needed.\n")
         out.append("```\nexample-log:")
         # Resolve, never echo. This printed whatever ref it was handed, so a caller
         # passing a branch name put a branch name in the block the reviewer copies -
@@ -1277,10 +1082,9 @@ def main(argv, author=None):
                    "Every line needs one — a blank is not an answer, and the gate will "
                    "say so.\n")
         out.append("The `commit:` line is already filled in; leave it as it is. It "
-                   "records which version you read, so if anyone pushes again your "
-                   "sign-off lapses instead of silently covering code you never saw.\n")
-        out.append("It cannot be the pull request's author who posts this. The record is "
-                   "only worth having because a second person looked.\n")
+                   "records the commit you reviewed, so if the branch is pushed again "
+                   "your sign-off lapses instead of covering code you did not see.\n")
+        out.append("The disposition must come from a reviewer other than the author.\n")
 
     # Every line in this section tells the reviewer not to look, so it may only carry
     # claims the run actually established. Binary blobs are skipped by check_b - they
@@ -1352,30 +1156,23 @@ def report_failure(exc, argv):
 def run(argv, _main=None):
     """main(), with every failure turned into a report. Returns the exit code.
 
-    The handler used to name its exceptions - GateError and UnicodeDecodeError - and
-    anything else escaped as a traceback. CI went red, which is correct, but the
-    review comment was built from stdout and nothing had been printed before the
-    crash, so the comment body was EMPTY. An empty comment reads as "ran, found
-    nothing": the gate's most dangerous possible output, produced by any bug nobody
-    anticipated, which is the only kind there is. An unanticipated exception is by
-    definition the case the named list does not cover, so the list was always going to
-    be the wrong shape.
+    Naming the expected exceptions (GateError, UnicodeDecodeError) let anything else
+    escape as a traceback: CI went red, correctly, but nothing was printed before the
+    crash, so the review comment built from stdout was empty - which reads as "ran, found
+    nothing". Catching `Exception` here turns any unanticipated bug into a report that
+    blocks instead. Not `BaseException`: main() exits through sys.exit, so swallowing
+    SystemExit or KeyboardInterrupt would be a new bug.
 
-    `Exception`, not `BaseException`: main() returning through sys.exit raises
-    SystemExit, and swallowing that - or KeyboardInterrupt - would be a new bug.
-
-    `_main` is a seam for the test that proves this, and nothing else: the failure
-    being guarded against is an exception type not yet invented, so the only honest
-    way to test it is to inject one.
+    `_main` is a seam for the test that injects an as-yet-uninvented exception type.
     """
     try:
         return (_main or main)(argv)
     except UnicodeDecodeError as exc:
-        # Belt and braces behind git_io._run's errors="replace". A decode error used
-        # to be raised INSIDE subprocess.run, before any returncode was looked at, so
-        # it escaped every handler here: an ordinary pull request touching a PNG ended
-        # the gate with a traceback and an empty report file. Named separately only to
-        # say what happened in words a reader can act on.
+        # Belt and braces behind git_io._run's errors="replace". A decode error used to
+        # be raised inside subprocess.run before any returncode was looked at, escaping
+        # every handler here - a PR touching a PNG ended the gate with a traceback and an
+        # empty report. Named separately only to say what happened in words a reader can
+        # act on.
         report_failure(GateError(f"could not decode git output: {exc}"), argv)
         return 2
     except GateError as exc:

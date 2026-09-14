@@ -1,24 +1,22 @@
 #!/usr/bin/env python3
 """MODIFICATIONS.md, generated from git history. Never hand-written.
 
-A fork has to say what it changed and when. Every field of that notice is already
-recorded in the history, so nobody types one: this projects the history onto the
-file. The only thing a human supplies is the baseline - the point the fork starts
-from - and that lives in THIS repository, keyed by consuming repo, precisely so a
-pull request in the described repo cannot move its own fork point and delete its
-own history in the same change.
+A fork has to say what it changed and when, and every field of that notice is already
+in the history, so nobody types one: this projects the history onto the file. The only
+human input is the baseline - where the fork starts - and it lives in this repository,
+keyed by consuming repo, so a pull request in the described repo cannot move its own
+fork point and delete its own history in the same change.
 
-Three modes, and only one of them writes anything:
+Three modes, one of which writes:
 
     modifications.py                     print the notice to stdout
     modifications.py --write             regenerate the file in place
     modifications.py --check BASE HEAD   compare against the committed file
 
-Every git command goes through git_io. `subprocess` is not imported here, and that
-is deliberate: the tolerant version of these calls - stdout, exit code ignored -
-turned a failed git command into "nothing to report" four separate times in this
-tooling. A generator that cannot read the history must say so; emitting a notice
-with no entries in it is the one answer it is never entitled to give.
+Every git command goes through git_io; `subprocess` is deliberately not imported here.
+The tolerant version of these calls - stdout kept, exit code ignored - turned a failed
+git command into "nothing to report" four separate times in this tooling. A generator
+that cannot read the history must say so rather than emit a notice with no entries.
 """
 
 import argparse
@@ -38,7 +36,7 @@ DEFAULT_CONFIG = os.path.join(
 REQUIRED_KEYS = ("upstream", "baseline", "baseline_date", "upstream_authors")
 
 # The shapes git gives a merge whose real title is in the body. A squash merge is not
-# in this list: its subject IS the title.
+# in this list: its subject is the title.
 MERGE_SUBJECT_RE = re.compile(
     r"^(?:Merge pull request #\d+ from |Merge branch |Merge branches |"
     r"Merge remote-tracking branch )")
@@ -69,13 +67,13 @@ class ConfigError(GateError):
 
 
 def parse_toml(text, source="config"):
-    """The small TOML subset this config needs, parsed STRICTLY.
+    """The small TOML subset this config needs, parsed strictly.
 
     Python here is 3.9: `tomllib` arrived in 3.11, and a third-party dependency for
     four keys per repo is not a trade anyone should take. So: tables with a quoted or
     bare key, string values, single-line arrays of strings, `#` comments.
 
-    Strict means anything outside that subset RAISES, naming the line. A tolerant
+    Strict means anything outside that subset raises, naming the line. A tolerant
     parser - skip what you do not recognise - is the same defect as a tolerant git
     call: a mistyped `upstream_authors` line would be silently dropped, and silently
     dropping the list that decides what counts as ours produces a longer notice with
@@ -160,7 +158,7 @@ def load_config(path, repo):
     """
     if not os.path.exists(path):
         raise ConfigError(
-            f"no modifications config at {path}. The baseline lives in the TOOLING "
+            f"no modifications config at {path}. The baseline lives in the tooling "
             f"repository, keyed by consuming repo, and cannot be read from the repo "
             f"being described.")
     with open(path, "r", encoding="utf-8") as fh:
@@ -196,7 +194,7 @@ def load_config(path, repo):
 def repo_identity(override=None):
     """`owner/name` for the checkout we are standing in.
 
-    `git config --get remote.origin.url` EXITS 1 when the key is absent, and exit 1
+    `git config --get remote.origin.url` exits 1 when the key is absent, and exit 1
     with an empty stderr is the one failure shape this tooling keeps being bitten by:
     sh_strict would report "failed (1): no error output", which tells the reader
     nothing. Catch it here and say what is actually wrong, and what to pass instead.
@@ -250,7 +248,7 @@ def resolve_baseline(baseline):
 def require_ancestor(baseline_sha, head):
     """The baseline must be an ancestor of head, or the range means nothing.
 
-    `git merge-base --is-ancestor` answers with an exit code and prints NOTHING, so a
+    `git merge-base --is-ancestor` answers with an exit code and prints nothing, so a
     false comes back indistinguishable from a git failure. Compute the merge-base
     instead and compare: equal is an ancestor, unequal is a fork point somewhere else,
     and an unrelated history raises out of git_io with the fetch-depth wording.
@@ -283,14 +281,14 @@ def is_upstream_author(name, email, patterns):
 
 
 def introduced_commits(sha, parents):
-    """The commits a merge BROUGHT IN, or None when the commit is not a merge.
+    """The commits a merge brought in, or None when the commit is not a merge.
 
     For parents P1 (first) and P2 that is `P1..P2`; for an octopus it is the union,
     `P2 P3 ... ^P1`. The union is the conservative reading: a larger introduced set
     makes "every commit here is upstream's" harder to satisfy, and leaning towards
     inclusion is the failure direction this tool has chosen everywhere else.
 
-    A range that cannot be READ raises. "Could not work out what this merge
+    A range that cannot be read raises. "Could not work out what this merge
     introduced" and "it introduced nothing of ours" decide opposite things about
     whether the entry is written at all, so they must never share a code path - and
     the likely causes (a shallow clone, a partial clone, a pruned object) are exactly
@@ -327,14 +325,14 @@ def introduced_commits(sha, parents):
 def is_upstream_change(name, email, introduced, patterns):
     """Is this entry upstream's work rather than ours?
 
-    The author of a MERGE commit is whoever performed the merge, which on a fork is
+    The author of a merge commit is whoever performed the merge, which on a fork is
     whoever was on duty - not whoever wrote the change. Reading that field lets every
     routine upstream sync we merged ourselves into the notice as our own modification,
     and drops our own work whenever an upstream maintainer or a bot did the merging.
     The second direction is the one that matters: a spurious entry is noise somebody
     deletes, a missing one is a compliance gap nobody can see.
 
-    So a merge is upstream's only when EVERY commit it introduced is upstream-authored.
+    So a merge is upstream's only when every commit it introduced is upstream-authored.
     A commit with no second parent has introduced nothing and is judged by its own
     author, which for a non-merge is the person who wrote it.
     """
@@ -375,8 +373,8 @@ def branch_names_in(subject):
 def unusable_because(text, branches):
     """Why this candidate cannot describe the change, or None when it can.
 
-    THE BRANCH-NAME RULE, stated rather than guessed: a candidate is merely a branch
-    name when it contains NO WHITESPACE and equals a branch the merge subject itself
+    The branch-name rule: a candidate is merely a branch
+    name when it contains no whitespace and equals a branch the merge subject itself
     names. Both halves are needed. `fix: don't crash on a/b paths` is an ordinary
     title with a slash in it, so "looks slashy" would delete real descriptions; and a
     one-word title like `Tidying` is kept, because nothing in the subject claims it is
@@ -398,7 +396,7 @@ def unusable_because(text, branches):
 
 
 def join_subjects(subjects, cap=3):
-    """Several introduced titles as ONE line, because one entry is one change.
+    """Several introduced titles as one line, because one entry is one change.
 
     Three is as much of a list as a reader can use, and the count tells them there is
     more. Both are fixed by the merge's own history, so the line reads the same on
@@ -411,7 +409,7 @@ def join_subjects(subjects, cap=3):
 
 
 def subject_for(subject, body, introduced, sha, warn):
-    """The title of the CHANGE, which is not always the subject of the commit.
+    """The title of the change, which is not always the subject of the commit.
 
     A squash merge puts the pull request title in the subject. A true merge commit
     puts `Merge pull request #19 from owner/work/thing` there and the real title -
@@ -466,7 +464,7 @@ def notice_path():
 
     `--check` reads the committed blob, and a blob path is always relative to the
     root. A bare `open(FILENAME, "w")` is relative to the process, so running --write
-    from a subdirectory would write a SECOND notice that the check can never see -
+    from a subdirectory would write a second notice that the check can never see -
     and the gate's own pattern is anchored to any path component, so it would start
     enforcing append-only on the stray one too.
     """
@@ -477,7 +475,7 @@ def notice_path():
 def touches_only_the_notice(sha):
     """Is this commit nothing but the notice being brought up to date?
 
-    THE CIRCULARITY THIS RESOLVES, because it is not obvious and the rule reads like
+    The circularity this resolves, because the rule reads like
     an exception otherwise. An entry carries the commit's short SHA, so the commit
     that WRITES the notice can never contain its own entry - amending changes the SHA
     the entry would have to name. Without this, the file is stale the instant it is
@@ -485,14 +483,14 @@ def touches_only_the_notice(sha):
     that follows a merge adds a bookkeeping entry which the next one records in turn,
     one commit behind for ever. Half the notice would end up being the notice.
 
-    So a commit whose diff touches NOTHING but the notice is bookkeeping, not a
-    modification. A commit touching the notice AND anything else is a real change and
+    So a commit whose diff touches nothing but the notice is bookkeeping, not a
+    modification. A commit touching the notice and anything else is a real change and
     stays: the boundary is "only", not "at all".
 
     `git diff --name-only <sha>^ <sha>` is deliberately per-commit rather than a
     clever single `git log`, because `--name-only` on a merge commit is a question
     with a surprising answer, and the direction the surprise runs is a commit read as
-    notice-only and dropped from the record. An EMPTY file list is never notice-only
+    notice-only and dropped from the record. An empty file list is never notice-only
     either - an empty commit is a commit - for the same reason.
     """
     out = sh_strict("git", "diff", "--name-only", "-z", f"{sha}^", sha, "--")
@@ -503,20 +501,20 @@ def touches_only_the_notice(sha):
 def collect_entries(baseline_sha, head, patterns, warn):
     """First-parent commits in baseline..head that are ours, oldest first.
 
-    FIRST-PARENT so one entry is one change: a twelve-commit pull request landed as a
-    merge is one line, not twelve. OLDEST FIRST so regenerating appends to the file
+    First-parent so one entry is one change: a twelve-commit pull request landed as a
+    merge is one line, not twelve. Oldest first so regenerating appends to the file
     rather than rewriting it - which is what keeps the notice append-only.
 
     The format is explicit and the separators are C0 controls, not newlines. Fields
     are split with a cap so a body can contain anything at all without reshaping the
-    record, and a record with too FEW fields raises rather than being skipped. `%b` is
-    LAST because it is the only field allowed to contain arbitrary text: put anything
+    record, and a record with too few fields raises rather than being skipped. `%b` is
+    last because it is the only field allowed to contain arbitrary text: put anything
     after it and the body quietly swallows it.
 
     The cost is a git call per first-parent commit, and now two for a merge: one to
     read what it introduced, one for the notice-only check. That is not reducible to a
     single traversal of `baseline..head`. A merge's second-parent side can reach back
-    BEFORE the baseline, so `P1..P2` is not a subset of what that traversal lists, and
+    before the baseline, so `P1..P2` is not a subset of what that traversal lists, and
     computing membership locally from it would silently lose introduced commits - in
     the direction of reading our own work as upstream's, which is the failure this
     module is here to prevent.
@@ -550,9 +548,9 @@ def collect_entries(baseline_sha, head, patterns, warn):
 def render(cfg, baseline_sha, entries):
     """The file, and nothing else in it.
 
-    Note what is NOT here: no count, no generation timestamp, no trailing marker.
+    Note what is not here: no count, no generation timestamp, no trailing marker.
     `licence-gate.py` enforces the register as append-only - the base blob must be a
-    byte-exact PREFIX of the head one - so anything printed after the entries moves
+    byte-exact prefix of the head one - so anything printed after the entries moves
     on every regeneration and makes the generator's own output fail the gate it is
     meant to feed. The abbreviation length is pinned for the same reason: `%h` grows
     with the repository, and an unpinned one would silently rewrite every earlier

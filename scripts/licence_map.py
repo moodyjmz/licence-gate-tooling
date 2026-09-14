@@ -3,8 +3,8 @@
 
 The split this module exists to enforce:
 
-  * WHICH LICENCE is a function of the path. Mechanical, decidable, testable here.
-  * WHO HOLDS COPYRIGHT is a function of who wrote it. Not decidable by any machine,
+  * Which licence is a function of the path. Mechanical, decidable, testable here.
+  * Who holds copyright is a function of who wrote it. Not decidable by any machine,
     so it is asserted by a human and only recorded here.
 
 Conflating those two is how both of the real failures happened: a rule reading
@@ -42,7 +42,7 @@ UNMAPPED = [
 ASSET_RE = re.compile(r"\.(svg|png|jpg|jpeg|gif|ico|woff2?|ttf|dat)$", re.I)
 
 # Every extension treated as source, and therefore every extension a licence header
-# may have to be written into. A TUPLE rather than a regex literal, because the
+# may have to be written into. A tuple rather than a regex literal, because the
 # invariant below - every one of these has a known comment syntax - is only testable
 # if the list can be enumerated. The regex is derived from it; there is nothing to
 # keep in step by hand.
@@ -51,11 +51,11 @@ ASSET_RE = re.compile(r"\.(svg|png|jpg|jpeg|gif|ico|woff2?|ttf|dat)$", re.I)
 # extensions, no `.php`, no `.vue`, no `.tsx`. The consuming repository is a PHP
 # application with JS/TS front-ends, so the gap was not hypothetical. check_a and
 # check_b never filtered by extension and were never affected; the hole was check_d,
-# where a NEW file with an unlisted extension took the asset branch and so never
+# where a new file with an unlisted extension took the asset branch and so never
 # reached the test that blocks a headerless new source file. A new `.php` file with no
 # licence header at all merged with an advisory candidate and exit 0.
 #
-# THIS IS ALSO THE ONE DEFINITION. There were two, in this module and in the gate, and
+# This is also the one definition. There were two, in this module and in the gate, and
 # they disagreed about `.html`: stampable here, an asset there. One definition of each
 # term, imported everywhere - three disagreeing definitions of "has a header" made a
 # file invisible to every check once already.
@@ -90,7 +90,7 @@ def classify(path, explicitly_named, has_header):
     """Decide what to do with one new file.
 
     `explicitly_named` is True when the human named this exact path in the command.
-    EVERY file requires that. An earlier version required it only for assets, on the
+    Every file requires that. An earlier version required it only for assets, on the
     reasoning that contributors usually write their own source while icons and fonts
     are the things people copy. That reasoning is sound on average and worthless as a
     safeguard: it was defeated by putting third-party code in a `.js` file. The file
@@ -132,7 +132,7 @@ def classify(path, explicitly_named, has_header):
     return (APPLY, lic, "")
 
 
-# THE one definition of "this line asserts ownership". Everything that needs to know
+# The one definition of "this line asserts ownership". Everything that needs to know
 # whether a file carries a header asks this, and nothing re-implements it.
 #
 # There were three implementations before, and they disagreed. The gate looked for
@@ -165,7 +165,7 @@ def classify(path, explicitly_named, has_header):
 #     keep, (b) drop, (c) defer" - and matching it would fire on every enumeration.
 #   * `©` takes a year or a capitalised word after it, so "the © symbol" is prose
 #     while "© Example Corp" is a claim.
-# Multi-line licence bodies are matched on a SHORT leading fragment only, because this
+# Multi-line licence bodies are matched on a short leading fragment only, because this
 # predicate is handed single lines by check_b and by apply_fix's anchor scan as well
 # as a joined region: a phrase long enough to wrap in a real header matches nothing.
 HEADER_RE = re.compile(
@@ -196,7 +196,7 @@ HEADER_RE = re.compile(
 )
 
 
-# Case-SENSITIVE, and separate for that reason alone. A copyright with no year -
+# Case-sensitive, and separate for that reason alone. A copyright with no year -
 # "Copyright Example Corp" - can only be told from prose by what follows the word: a
 # capitalised name rather than "and licensing", "questions", "holder", "of each".
 # Putting that alternative in HEADER_RE does not work, because HEADER_RE carries re.I
@@ -212,7 +212,7 @@ def has_licence_header(text):
     return bool(HEADER_RE.search(text) or NAMED_COPYRIGHT_RE.search(text))
 
 
-# A STRUCTURED LICENCE DECLARATION: the licence as a FIELD, not as a header comment.
+# A structured licence declaration: the licence as a field, not a header comment.
 #
 # HEADER_RE above is a prose matcher and requires a colon. None of these forms have
 # one in the right place, so every one of them was seen by nothing at all:
@@ -223,7 +223,7 @@ def has_licence_header(text):
 #   debian/copyright, .reuse/dep5  License: AGPL-3   /   Copyright: 2020 Example Corp
 #   *.spec (RPM)                   License: AGPLv3
 #
-# These are the declarations the SHIPPED ARTEFACTS carry. The header in a .php file
+# These are the declarations the shipped artefacts carry. The header in a .php file
 # does not go in the .deb's metadata, the .rpm's metadata or the npm registry entry -
 # this field does. Changing `"license"` from AGPL-3.0 to MIT relicensed everything the
 # build produces and the gate reported that no licence line had been altered.
@@ -256,7 +256,7 @@ _DECLARATION_FIELDS = {
 
 _JSON_LICENCE_KEYS = ("license", "licenses", "licence", "licences")
 
-# `parsed` is False when the format could not be read at all. That is NOT the same as
+# `parsed` is False when the format could not be read at all. That is not the same as
 # "no licence declared", and the caller must not treat it as one: a package.json this
 # tool cannot parse is a package.json whose licence field this tool did not check.
 DeclaredLicence = collections.namedtuple("DeclaredLicence", "values parsed")
@@ -275,7 +275,7 @@ def licence_declaration(path, content):
 
     Returns None when the path is not one, otherwise a DeclaredLicence whose `values`
     are compared across the two ends of a change. Comparison is on the extracted
-    fields ONLY, so a dependency bump - which rewrites most of a package.json and
+    fields only, so a dependency bump - which rewrites most of a package.json and
     leaves the licence alone - produces no finding at all. That silence is the point:
     a candidate on every bump is the deadlock the gate has already paid for once.
     """
@@ -311,7 +311,7 @@ _BLOCK_STYLES = (("/*", "*/"), ("<!--", "-->"))
 
 # Line-comment markers this scan recognises. `--` is here because SQL and Lua are now
 # classified as source, and a source file whose comment marker this scan does not know
-# has an EMPTY leading comment region - so check_a reads it as carrying no header and
+# has an empty leading comment region - so check_a reads it as carrying no header and
 # demands no modification notice, in silence. Widening what counts as source without
 # widening this is how a file gets moved out of the asset path, where it at least
 # raised a candidate, into the source path, where nothing looks at it.
@@ -325,7 +325,7 @@ def leading_comment_lines(content):
     ended; it simply threw that away and returned text. Anything that then wanted to
     know whether a given line was inside a block comment had to re-derive it, and
     re-deriving it per line is guessing: apply_fix matched the leading `*` of a
-    block-comment body with a LINE-comment marker pattern and appended the
+    block-comment body with a line-comment marker pattern and appended the
     modification notice after the `*/`, i.e. outside the comment, as a bare
     statement. `node --check` rejected the result and /auto-fix committed and pushed
     it. The state is knowable, so hand it out rather than making callers guess.
@@ -388,7 +388,6 @@ def leading_comment_region(content):
     Scanning the whole file instead would be worse, not better. Any file quoting a
     licence in prose, or a vendored bundle carrying per-section headers far down,
     would start registering as "has a header" and demanding notices it does not need.
-    False positives are how people learn to click past a compliance gate.
 
     So keep the rule and drop the number: read from the top until the first line that
     is neither blank nor part of a comment.
@@ -409,7 +408,7 @@ def header_lines(licence, comment="//"):
     return [f"{comment} {t}" for t in header_texts(licence)]
 
 
-# How each extension spells a comment. The value is the OPENING token; block styles
+# How each extension spells a comment. The value is the opening token; block styles
 # are recognised by it and closed accordingly.
 #
 # EVERY EXTENSION IN SOURCE_EXTENSIONS MUST APPEAR HERE, and a test enforces it. A
