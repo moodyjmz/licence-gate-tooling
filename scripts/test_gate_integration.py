@@ -83,7 +83,7 @@ class TestDiffStructureCannotBeForged(GateCase):
                    + LICENSED.replace("2020 Example Corp", "2099 Attacker") + "const x = 1;\n")
         self.commit("rewrite the holder")
         report = self.assertBlocks("a forged diff header must not hide a copyright rewrite")
-        self.assertIn("removed or altered", report)
+        self.assertIn("licence line", report)
 
     def test_a_deleted_line_beginning_with_dashes_is_still_content(self):
         """The second audit's critical finding, one layer down. A deleted line whose
@@ -112,18 +112,18 @@ class TestHeadersThatAreNotSpelledCopyright(GateCase):
     def test_a_bare_copyright_sign_line_cannot_be_deleted_silently(self):
         self._drop_the_header_line(" * © 2020 Example Corp")
         report = self.assertBlocks("deleting a © line must block")
-        self.assertIn("removed or altered", report)
+        self.assertIn("licence line", report)
         self.assertNotIn("no licence or copyright line deleted", report,
                          "the verified box must not certify what was not checked")
 
     def test_a_paren_c_line_cannot_be_deleted_silently(self):
         self._drop_the_header_line(" * (c) 2020 Example Corp")
-        self.assertIn("removed or altered",
+        self.assertIn("licence line",
                       self.assertBlocks("deleting a (c) line must block"))
 
     def test_an_all_rights_reserved_line_cannot_be_deleted_silently(self):
         self._drop_the_header_line(" * (C) 2020 Example Corp, all rights reserved")
-        self.assertIn("removed or altered",
+        self.assertIn("licence line",
                       self.assertBlocks("deleting an (C)/all-rights-reserved line must block"))
 
 
@@ -157,7 +157,7 @@ class TestCheckBWithoutADiffParser(GateCase):
         self.write("src/new.js", LICENSED + "const n = 1;\n")
         self.commit("add a licensed file")
         report = self.assertClean("adding an already-licensed file is not a violation")
-        self.assertNotIn("removed or altered", report,
+        self.assertNotIn("licence line", report,
                          "adding a header must never read as removing one")
 
     def test_a_reordered_header_line_is_not_a_false_positive(self):
@@ -210,7 +210,7 @@ class TestCheckBWithoutADiffParser(GateCase):
         status = self._git("diff", "--raw", "HEAD~1", "HEAD").stdout
         self.assertIn("160000", status, f"expected a gitlink, got {status!r}")
         report = self.assertBlocks("a file replaced by a gitlink loses its whole header")
-        self.assertIn("removed or altered", report)
+        self.assertIn("licence line", report)
         self.assertIn("2020 Example Corp", report)
 
     def test_a_font_swap_reaches_a_human(self):
@@ -309,7 +309,7 @@ class TestBinaryIsDecidedTheWayGitDecidesIt(GateCase):
         self.assertGreater(os.path.getsize(os.path.join(self.dir, "src/big.js")), 8000)
 
         report = self.assertBlocks("git calls this text, so the gate must too")
-        self.assertIn("removed or altered", report)
+        self.assertIn("licence line", report)
         self.assertIn("2020 Example Corp", report)
 
     def test_a_blob_binary_at_one_end_only_is_checked_not_routed(self):
@@ -324,7 +324,7 @@ class TestBinaryIsDecidedTheWayGitDecidesIt(GateCase):
         self.write_bytes("src/panel.js", b"const x = 2;\n")
         self.commit("delete the header and remove the fixture")
         report = self.assertBlocks("a text head end makes the line check possible")
-        self.assertIn("removed or altered", report)
+        self.assertIn("licence line", report)
         self.assertIn("Upstream Foundry", report)
         self.assertNotIn("no line-level check is possible", report,
                          "the gate may not state a reason that is untrue; the check "
@@ -343,7 +343,7 @@ class TestBinaryIsDecidedTheWayGitDecidesIt(GateCase):
                          b"\x00\x01\x00\x02Copyright (c) 2024 Other Foundry\xff\xfe")
         self.commit("swap the blob")
         code, report = self.run_gate()
-        self.assertNotIn("removed or altered", report,
+        self.assertNotIn("licence line", report,
                          "a binary has no lines anyone can restore")
         self.assertIn("src/blob.js", self._candidates(),
                       "a binary skipped by check_b must reach the reviewer, or it "
@@ -405,9 +405,9 @@ class TestTheRegisterDoesNotBlockItself(GateCase):
                 report = self.assertClean(
                     "recording a replacement must not be blocked by the gate that "
                     "asked for the record")
-                self.assertNotIn("Ownership claimed", report,
+                self.assertNotIn("new ownership claim", report,
                                  "a row naming a holder is a record, not a claim")
-                self.assertNotIn("missing a notice", report)
+                self.assertNotIn("Add the modification notice", report)
 
     def test_editing_an_entry_is_never_read_as_altering_a_licence(self):
         """AMENDED, not weakened. This used to assert a clean exit; editing a recorded
@@ -424,8 +424,8 @@ class TestTheRegisterDoesNotBlockItself(GateCase):
         self.commit("correct a row")
         report = self.assertBlocks("editing a recorded row blocks as an append violation")
         self.assertIn("append-only", report)
-        self.assertNotIn("removed or altered", report)
-        self.assertNotIn("Ownership claimed", report)
+        self.assertNotIn("licence line", report)
+        self.assertNotIn("new ownership claim", report)
 
     def test_the_notice_file_still_reaches_the_gate(self):
         """The exclusion is scoped to the header logic. The path stays in every list the
@@ -478,14 +478,14 @@ class TestDeletionIsAnswerableNotUnresolvable(GateCase):
         os.remove(os.path.join(self.dir, "src/licensed_file.js"))
         self.commit("delete the licensed file")
         code, report = self.run_gate()
-        self.assertNotIn("removed or altered", report,
+        self.assertNotIn("licence line", report,
                          "there is no file left to restore a line into")
         self.assertNotIn("could not run", report)
         self.assertIn("src/licensed_file.js", self._candidates(),
                       "a deletion that raises no candidate is a silent pass, which is "
                       "worse than the unresolvable block it replaced")
         self.assertIn("src/licensed_file.js", report)
-        self.assertIn("A reviewer must answer these", report)
+        self.assertIn("for a reviewer", report)
         self.assertEqual(code, 0, report)
         self.assertNotIn("- no licence or copyright line deleted or altered\n", report,
                          "routing the deletion out of check_b must not buy a clean "
@@ -513,7 +513,7 @@ class TestDeletionIsAnswerableNotUnresolvable(GateCase):
         self.assertIn("D\t", raw, "the rewrite must be below git's rename threshold")
         self.assertIn("A\t", raw, "expected delete-plus-add, not R")
         _code, report = self.run_gate()
-        self.assertNotIn("removed or altered", report,
+        self.assertNotIn("licence line", report,
                          "the old path is gone; nothing can be restored into it")
         self.assertIn("src/old_widget.js", self._candidates(),
                       "the replacement must still reach the acknowledgement gate")
@@ -548,7 +548,7 @@ class TestHeaderProminenceNotJustPresence(GateCase):
         self.commit("move the upstream line into a template string")
         report = self.assertBlocks("attribution moved out of the header is destroyed "
                                    "even though the bytes survive")
-        self.assertIn("removed or altered", report)
+        self.assertIn("licence line", report)
         self.assertIn("Upstream Foundry", report,
                       "name the line, or the reviewer cannot judge it")
         self.assertNotIn("no licence or copyright line deleted", report,
@@ -568,7 +568,7 @@ class TestHeaderProminenceNotJustPresence(GateCase):
                    "const x = 2;\n")
         self.commit("promote the upstream line into the header")
         report = self.assertClean("a line moving INTO the header has lost no prominence")
-        self.assertNotIn("removed or altered", report)
+        self.assertNotIn("licence line", report)
 
     def test_an_unrelated_edit_inside_the_comment_block_is_not_a_removal(self):
         """Editing a non-header line inside the region must not drag the header lines
@@ -584,7 +584,7 @@ class TestHeaderProminenceNotJustPresence(GateCase):
                    "const x = 2;\n")
         self.commit("edit an ordinary comment line in the header block")
         report = self.assertClean("an ordinary comment edit is not a licence removal")
-        self.assertNotIn("removed or altered", report)
+        self.assertNotIn("licence line", report)
 
 
 class TestPathsGitQuotes(GateCase):
@@ -1044,7 +1044,7 @@ class TestAutomatedDependencyUpdates(GateCase):
         report = self.assertClean("a lockfile edit must not prompt")
         # Not a bare substring test: "candidate" appears in the standing boilerplate
         # under "not checked". What matters is that no candidates SECTION was emitted.
-        self.assertNotIn("A reviewer must answer these", report)
+        self.assertNotIn("for a reviewer", report)
         self.assertIn("Nothing to do", report)
 
     def test_our_own_code_is_still_checked(self):
@@ -1077,7 +1077,7 @@ class TestAddedOwnershipClaims(GateCase):
                      'export function panel(){ return 1; }\n')
         self.commit("claim ownership")
         code, report = self.run_gate()
-        self.assertIn("Ownership claimed", report,
+        self.assertIn("new ownership claim", report,
                       "an added ownership claim must be surfaced, not ignored")
         self.assertIn("Evil Corp", report, "say which line, or the reviewer cannot judge")
         self.assertNotIn("Nothing to do", report)
@@ -1092,7 +1092,7 @@ class TestAddedOwnershipClaims(GateCase):
                    + "const x = 2;\n")
         self.commit("add the notice")
         code, report = self.run_gate()
-        self.assertNotIn("Ownership claimed", report)
+        self.assertNotIn("new ownership claim", report)
         self.assertEqual(code, 0, report)
 
     def test_an_unchanged_file_claims_nothing(self):
@@ -1102,7 +1102,7 @@ class TestAddedOwnershipClaims(GateCase):
         self.write("src/b.js", "const y = 2;\n")
         self.commit("touch an unlicensed file")
         code, report = self.run_gate()
-        self.assertNotIn("Ownership claimed", report)
+        self.assertNotIn("new ownership claim", report)
 
 
 class TestTheBaseIsTheMergeBase(GateCase):
@@ -1165,7 +1165,7 @@ class TestTheBaseIsTheMergeBase(GateCase):
         self.commit("drop the header")
         code, report, _err = self.gate("main", "pr")
         self.assertEqual(code, 1, report)
-        self.assertIn("removed or altered", report)
+        self.assertIn("licence line", report)
         self.assertIn("src/f.js", report)
 
     def test_a_file_changed_on_both_branches_is_judged_only_on_the_authors_change(self):
@@ -1281,7 +1281,7 @@ class TestSourceIsTheRealEstatesSourceList(GateCase):
                    "-- Licensed under the Example License 1.0\nSELECT 2;\n")
         self.commit("edit the query, keep the header")
         report = self.assertBlocks("a -- comment header must be seen by check_a")
-        self.assertIn("missing a notice", report)
+        self.assertIn("Add the modification notice", report)
 
 
 class TestStructuredLicenceDeclarations(GateCase):
@@ -1312,7 +1312,7 @@ class TestStructuredLicenceDeclarations(GateCase):
                      '{"name":"thing","license":"AGPL-3.0"}\n',
                      '{"name":"thing","license":"MIT"}\n')
         report = self.assertClean("a licence field change must not block")
-        self.assertIn("A reviewer must answer these", report)
+        self.assertIn("for a reviewer", report)
         self.assertIn("package.json", report)
         self.assertIn("licence declaration", report)
 
@@ -1385,7 +1385,7 @@ class TestStructuredLicenceDeclarations(GateCase):
                      '{"name":"thing","license":"AGPL-3.0",'
                      '"dependencies":{"a":"1.1.0"}}\n')
         report = self.assertClean("a dependency bump must stay quiet")
-        self.assertNotIn("A reviewer must answer these", report)
+        self.assertNotIn("for a reviewer", report)
         self.assertIn("Nothing to do", report)
 
     def test_a_declaration_that_cannot_be_parsed_is_a_question_not_a_pass(self):
@@ -1406,7 +1406,7 @@ class TestStructuredLicenceDeclarations(GateCase):
                      '{"packages":{"a":{"version":"1.0.0"}}}\n',
                      '{"packages":{"a":{"version":"1.1.0"}}}\n')
         report = self.assertClean("a lockfile is not a licence declaration")
-        self.assertNotIn("A reviewer must answer these", report)
+        self.assertNotIn("for a reviewer", report)
 
     def test_a_new_package_json_declaring_a_licence_reaches_a_reviewer(self):
         self._git("commit", "-q", "--allow-empty", "-m", "base")
@@ -1572,7 +1572,7 @@ class TestTheRegisterIsAppendOnly(GateCase):
         self.write("MODIFICATIONS.md", self.LOG.replace("src/a.js", "src/aa.js"))
         self.commit("fix a typo in a recorded row")
         report = self.assertBlocks("rewriting a recorded row must block")
-        self.assertIn("append a new row", report.lower())
+        self.assertIn("a new row correcting it", report.lower())
         self.assertIn("anyone with write access", report.lower())
 
     def test_deleting_the_register_outright_blocks(self):
@@ -1656,7 +1656,7 @@ class TestANewFileWearingSomeoneElsesHeader(GateCase):
         self.assertIn("src/imported.js", self._candidates(),
                       "a file arriving under someone else's copyright is the single "
                       "most interesting thing the register can record")
-        self.assertIn("names someone other than us", report)
+        self.assertIn("does not name us", report)
 
     def test_a_new_file_with_our_own_header_raises_nothing(self):
         self.write("src/keep.js", "const y = 1;\n")
@@ -1667,7 +1667,7 @@ class TestANewFileWearingSomeoneElsesHeader(GateCase):
         self.assertNotIn("src/mine.js", self._candidates(),
                          "prompting on every first-party file is how a gate becomes "
                          "something people click past")
-        self.assertNotIn("names someone other than us", report)
+        self.assertNotIn("does not name us", report)
 
     def test_a_new_file_with_no_header_still_blocks(self):
         self.write("src/keep.js", "const y = 1;\n")
