@@ -72,13 +72,18 @@ def render(*, a, b, c, g, d_src, d_assets, d_links, d_foreign, claims,
 
     # ONE LINE THAT SAYS WHETHER THIS MERGES. The reader's first question, answered
     # before anything else, and in the two words the rest of the comment is about.
+    #
+    # It does NOT name the gate. The posting step wraps this body under its own
+    # "## Licence gate", so naming it here put the name twice in three lines - a
+    # heading that repeats its parent tells the reader nothing and costs them the
+    # first line of the comment, which is the one line that has their attention.
     if a or b or d_src or g:
-        out.append("### 🚫 Licence gate — blocked\n")
+        out.append("### 🚫 Blocked\n")
     elif c or claims or d_assets or d_links or d_foreign:
-        out.append("### ⏳ Licence gate — waiting on a reviewer\n")
+        out.append("### ⏳ Waiting on a reviewer\n")
         out.append("Nothing here blocks the merge on its own.\n")
     else:
-        out.append("### ✅ Licence gate — Nothing to do\n")
+        out.append("### ✅ Nothing to do\n")
 
     # ---------------------------------------------------------------- blocking
     #

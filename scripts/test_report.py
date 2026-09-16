@@ -35,12 +35,20 @@ class TestTheFirstLineAnswersTheFirstQuestion(unittest.TestCase):
     report used to answer it in the third paragraph, in prose, by implication."""
 
     def test_a_blocking_finding_says_blocked(self):
-        self.assertIn("blocked", report(a=["src/a.js"]).split("\n")[0])
+        # Case-insensitively: the verdict is the assertion, not how it is capitalised.
+        self.assertIn("blocked", report(a=["src/a.js"]).split("\n")[0].lower())
 
     def test_candidates_alone_do_not_say_blocked(self):
-        first = report(c=[("logo.png", "asset modified")]).split("\n")[0]
+        first = report(c=[("logo.png", "asset modified")]).split("\n")[0].lower()
         self.assertNotIn("blocked", first)
         self.assertIn("reviewer", first)
+
+    def test_the_heading_does_not_repeat_the_name_its_wrapper_gives(self):
+        """The posting step wraps this body under "## Licence gate". Naming the gate
+        again in the first heading spent the reader's first line on a word they had
+        just read."""
+        for kw in (dict(a=["src/a.js"]), dict(c=[("logo.png", "x")]), dict()):
+            self.assertNotIn("Licence gate", report(**kw).split("\n")[0])
 
     def test_nothing_at_all_says_nothing_to_do(self):
         self.assertIn("Nothing to do", report().split("\n")[0])
