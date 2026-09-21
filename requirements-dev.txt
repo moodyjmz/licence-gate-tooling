@@ -1,0 +1,9 @@
+# Test-only. Nothing the gate runs at review time needs a third-party package: the
+# actions run on whatever python3 the runner has, and a dependency there would be a
+# dependency every consuming repository inherits.
+#
+# PyYAML is here because three test modules parse the action definitions and execute
+# their `run:` bodies. That is the layer a pull request reaches first, and it went
+# untested for a release because the runner's stock python3 happened to carry PyYAML
+# and `actions/setup-python` - which installs a clean interpreter - does not.
+PyYAML>=5.1

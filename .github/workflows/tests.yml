@@ -26,5 +26,8 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '20'
+      # Named in requirements-dev.txt rather than installed inline, so the
+      # dependency is written down where a contributor setting up locally reads it.
+      - run: python3 -m pip install -r requirements-dev.txt
       - working-directory: scripts
         run: python3 -m unittest discover -p 'test_*.py' -v
