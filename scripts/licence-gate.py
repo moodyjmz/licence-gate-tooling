@@ -812,6 +812,42 @@ def _add_reason(cands, path, why):
     cands.append((path, why))
 
 
+# A directory's worth of identical findings is one decision, not N. A pull request
+# deleting several thousand generated assets for a single reason produces a report
+# in the megabytes, with a disposition block past the comment cap that no human
+# could paste even if it fit. Collapsing narrows, so the rules are deliberately timid:
+#
+#   - the grouping key is an exact dirname, never a common prefix. A prefix
+#     spans sibling trees, so `vendor/` and `src/` findings could roll up under
+#     a shared ancestor and report as one decision. Exact equality cannot.
+#   - a directory holding two different reasons is left fully enumerated. The
+#     acknowledgement gate matches a disposition line by key, so two candidates
+#     sharing the key `img/*` would both be satisfied by one answer - a reviewer
+#     dispositions one reason and the other passes silently. Unique keys or none.
+#   - repository-root files never collapse: dirname is empty, and `/*` there
+#     means the whole tree.
+#   - below the threshold the paths are worth more than the summary.
+#
+# The count goes in the reason because a collapsed line without it reads as one
+# file. Both the report and --candidates consume this, so they cannot disagree.
+COLLAPSE_THRESHOLD = 5
+
+
+def _collapse_bulk(cands, threshold=COLLAPSE_THRESHOLD):
+    groups, reasons = {}, {}
+    for p, reason in cands:
+        d = p.rsplit("/", 1)[0] if "/" in p else ""
+        groups.setdefault((d, reason), []).append(p)
+        reasons.setdefault(d, set()).add(reason)
+    out = []
+    for (d, reason), paths in groups.items():
+        if d and len(paths) >= threshold and len(reasons[d]) == 1:
+            out.append((d + "/*", reason + " ({:,} files)".format(len(paths))))
+        else:
+            out.extend((p, reason) for p in paths)
+    return out
+
+
 def check_c(added, modified, deleted, renamed, gitlinks=(), binary_skips=(),
             claims=(), *, declarations, attributes):
     """Candidate replacement events. Over-detects by design.
@@ -880,7 +916,7 @@ def check_c(added, modified, deleted, renamed, gitlinks=(), binary_skips=(),
     # path or an asset, and the specific reason is the one worth reading.
     for path, why in list(declarations) + list(attributes):
         _add_reason(cands, path, why)
-    return cands
+    return _collapse_bulk(cands)
 
 
 def _indent_of(line):
